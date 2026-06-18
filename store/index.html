@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dotrino — Message Store</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 1rem; color: #444; background: #fafafa; }
+    code { background: #eee; padding: 2px 6px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Dotrino — Message Store</h1>
+  <p>This page is the cross-instance storage for Dotrino message threads.
+     It is meant to be embedded as an invisible iframe by the messenger and similar apps.</p>
+  <p>All data lives in <code>IndexedDB</code> at this origin only (persistent, large quota) —
+     never leaves your browser and never reaches any server. Optional end-to-end encrypted
+     sync to your own Google Drive is available but off by default.</p>
+  <p>Source: <a href="https://github.com/imdotrino/dotrino-store" target="_blank" rel="noopener">github.com/imdotrino/dotrino-store</a></p>
+  <script type="module" src="./store.js"></script>
+</body>
+</html>

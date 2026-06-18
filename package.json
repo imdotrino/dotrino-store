@@ -1,0 +1,39 @@
+{
+  "name": "@dotrino/store",
+  "version": "0.4.0",
+  "description": "Almacén compartido de hilos de mensajes para el ecosistema Dotrino (vault iframe + postMessage)",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "store",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  },
+  "keywords": [
+    "dotrino",
+    "store",
+    "messaging",
+    "cross-app"
+  ],
+  "author": "seyacat",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imdotrino/dotrino-store.git"
+  }
+}
