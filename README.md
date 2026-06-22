@@ -1,5 +1,7 @@
 # @dotrino/store
 
+> **Parte del ecosistema [Dotrino](https://dotrino.com).** Misión: aplicaciones que resuelven problemas comunes, respetando tu privacidad — sin anuncios, sin cookies, sin rastreo de datos, sin vender tu identidad a nadie.
+
 Almacén compartido de hilos de mensajes para el ecosistema [Dotrino](https://github.com/imdotrino).
 
 Mismo patrón que [dotrino-identity](https://github.com/imdotrino/dotrino-identity): un iframe oculto servido desde `store.dotrino.com` mantiene los datos en su propio almacenamiento. Cualquier app del ecosistema (web messenger, extensión Chrome, futura app móvil PWA) que cargue este iframe en el mismo navegador comparte los mismos hilos.
