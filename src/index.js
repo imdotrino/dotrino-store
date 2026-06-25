@@ -18,6 +18,12 @@ export class Store {
     this._handler = null
     this._pending = new Map()
     this._nextId = 1
+    // Si pasás una Identity emparejada (options.identity), el store se respalda EN tu
+    // vault: el iframe (IndexedDB) queda como CACHÉ y la fuente de verdad es tu bóveda.
+    // Opt-in y retrocompatible: sin identity, comportamiento idéntico al de hoy (local).
+    this._identity = options.identity || null
+    this._vaultMode = false
+    this._vaultDirty = false // hay escrituras locales sin subir al vault (se hicieron offline)
   }
 
   static async connect (options = {}) {
@@ -48,7 +54,7 @@ export class Store {
         if (event.source !== iframe.contentWindow) return
         const msg = event.data
         if (!msg || msg._ccs !== true) return
-        if (msg.type === 'ready') { clearTimeout(timeout); resolve(this); return }
+        if (msg.type === 'ready') { clearTimeout(timeout); this._enableVault().finally(() => resolve(this)); return }
         if (msg.type === 'response') {
           const pending = this._pending.get(msg.id)
           if (!pending) return
@@ -91,37 +97,94 @@ export class Store {
     })
   }
 
+  // ----- respaldo en el vault (opt-in vía options.identity) -----
+
+  /** Comprueba el emparejamiento y reconcilia (merge idempotente por id) caché ↔ vault. */
+  async _enableVault () {
+    if (!this._identity) return
+    try {
+      const st = await this._identity.vaultStatus()
+      if (!st?.paired) { this._vaultMode = false; return }
+      this._vaultMode = true
+      const localExp = await this._call('exportThreads')
+      if (localExp?.threads && Object.keys(localExp.threads).length) {
+        await this._identity.vaultStore('importThreads', { threads: localExp.threads, mode: 'merge' })
+      }
+      const vaultExp = await this._identity.vaultStore('exportThreads')
+      if (vaultExp?.threads && Object.keys(vaultExp.threads).length) {
+        await this._call('importThreads', { threads: vaultExp.threads, mode: 'merge' })
+      }
+      this._vaultDirty = false
+    } catch (_) { this._vaultMode = false } // vault apagado → modo local (caché)
+  }
+
+  /** ¿El store está respaldado en tu vault ahora mismo? */
+  get vaultBacked () { return this._vaultMode }
+
+  /** Si hubo escrituras offline, sube la caché completa al vault (merge) en cuanto vuelve. */
+  async _flushDirty () {
+    if (!this._vaultMode || !this._vaultDirty) return
+    try {
+      const exp = await this._call('exportThreads')
+      if (exp?.threads && Object.keys(exp.threads).length) await this._identity.vaultStore('importThreads', { threads: exp.threads, mode: 'merge' })
+      this._vaultDirty = false
+    } catch (_) { /* sigue offline */ }
+  }
+
+  /** Escritura: SIEMPRE a la caché local, y al vault si está emparejado/online. */
+  async _write (method, params) {
+    if (this._vaultMode) await this._flushDirty()
+    const local = await this._call(method, params)
+    if (this._vaultMode) {
+      try { await this._identity.vaultStore(method, params) } catch (_) { this._vaultDirty = true } // offline: queda en caché, sube al reconectar
+    }
+    return local
+  }
+
+  /** Lectura: del vault (ve a tus otros dispositivos); si está offline, de la caché. */
+  async _read (method, params) {
+    if (this._vaultMode) {
+      await this._flushDirty()
+      try { return await this._identity.vaultStore(method, params) } catch (_) { /* offline → caché */ }
+    }
+    return this._call(method, params)
+  }
+
   ping () { return this._call('ping') }
 
   setMaxPerThread (max) { return this._call('setMaxPerThread', { max }) }
 
-  appendMessage (threadKey, entry) { return this._call('appendMessage', { threadKey, entry }) }
+  appendMessage (threadKey, entry) { return this._write('appendMessage', { threadKey, entry }) }
 
-  listThread (threadKey, opts = {}) { return this._call('listThread', { threadKey, ...opts }) }
+  listThread (threadKey, opts = {}) { return this._read('listThread', { threadKey, ...opts }) }
 
-  listThreadKeys () { return this._call('listThreadKeys') }
+  listThreadKeys () { return this._read('listThreadKeys') }
 
-  getThreadSummaries () { return this._call('getThreadSummaries') }
+  getThreadSummaries () { return this._read('getThreadSummaries') }
 
-  removeThread (threadKey) { return this._call('removeThread', { threadKey }) }
+  removeThread (threadKey) { return this._write('removeThread', { threadKey }) }
 
-  removeMessage (threadKey, id) { return this._call('removeMessage', { threadKey, id }) }
+  removeMessage (threadKey, id) { return this._write('removeMessage', { threadKey, id }) }
 
-  clearAll () { return this._call('clearAll') }
+  async clearAll () {
+    const r = await this._call('clearAll')
+    if (this._vaultMode) { try { await this._identity.vaultStore('importThreads', { threads: {}, mode: 'replace' }) } catch (_) {} }
+    return r
+  }
 
-  getStats () { return this._call('getStats') }
+  getStats () { return this._call('getStats') } // local: es el uso de almacenamiento del navegador
 
   // ----- contador de aperturas por app ("recientes" del hub) -----
   /** Registra una apertura de `appId` (típicamente el hostname de la app). */
-  recordOpen (appId) { return this._call('recordOpen', { appId }) }
+  recordOpen (appId) { return this._write('recordOpen', { appId }) }
   /** Devuelve { [appId]: { count, ts } } con todas las aperturas registradas. */
-  getOpens () { return this._call('getOpens') }
+  getOpens () { return this._read('getOpens') }
   /** Borra el contador de aperturas. */
-  clearOpens () { return this._call('clearOpens') }
+  clearOpens () { return this._write('clearOpens') }
 
   // ----- export / import -----
-  exportThreads () { return this._call('exportThreads') }
-  importThreads (threads, mode = 'merge') { return this._call('importThreads', { threads, mode }) }
+  exportThreads () { return this._read('exportThreads') }
+  importThreads (threads, mode = 'merge') { return this._write('importThreads', { threads, mode }) }
 
   // ----- Drive sync -----
   syncConnect (clientId) { return this._call('syncConnect', { clientId }) }
