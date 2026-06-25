@@ -56,6 +56,11 @@ const OPENS_LS_KEY = 'cc.store.opens.v1'
 const MAX_PER_THREAD_DEFAULT = 1000
 let maxPerThread = MAX_PER_THREAD_DEFAULT
 let sync = null
+// Multi-perfil: el store se namespacea por el perfil activo. El cliente llama `setProfile`
+// (con el id que da @dotrino/identity) ni bien conecta. Cada perfil = sus propios hilos/aperturas.
+let _pid = null
+const threadsKey = () => _pid ? `threads.${_pid}.v1` : IDB_KEY
+const opensKey = () => _pid ? `opens.${_pid}.v1` : OPENS_IDB_KEY
 
 // ----- persistencia en IndexedDB -------------------------------------------
 //
@@ -116,29 +121,17 @@ async function init () {
   try { if (navigator.storage?.persist) await navigator.storage.persist() } catch (_) { /* best-effort */ }
   try {
     idb = await openIdb()
-    const stored = await idbGet(idb, IDB_KEY)
-    if (stored && typeof stored === 'object') {
-      state = stored
-    } else {
-      // Migración one-time desde el localStorage anterior.
-      try {
-        const raw = localStorage.getItem(KEY)
-        if (raw) {
-          state = JSON.parse(raw) || {}
-          await idbSet(idb, IDB_KEY, state)
-          console.log('[cc-store] migrado localStorage → IndexedDB')
-        }
-      } catch (e) { console.warn('[cc-store] migración falló:', e); state = {} }
-    }
+    const stored = await idbGet(idb, threadsKey())
+    state = (stored && typeof stored === 'object') ? stored : {}
   } catch (e) {
     console.warn('[cc-store] IndexedDB no disponible, uso localStorage:', e)
     usingFallback = true
     idb = null
-    try { const raw = localStorage.getItem(KEY); state = raw ? JSON.parse(raw) : {} } catch { state = {} }
+    try { const raw = localStorage.getItem(threadsKey()); state = raw ? JSON.parse(raw) : {} } catch { state = {} }
   }
   // Carga el contador de aperturas (namespace aparte de los hilos).
   try {
-    const stored = idb ? await idbGet(idb, OPENS_IDB_KEY) : JSON.parse(localStorage.getItem(OPENS_LS_KEY) || 'null')
+    const stored = idb ? await idbGet(idb, opensKey()) : JSON.parse(localStorage.getItem(opensKey()) || 'null')
     opens = (stored && typeof stored === 'object') ? stored : {}
   } catch (_) { opens = {} }
 }
@@ -148,8 +141,8 @@ initPromise = init()
 // de apps), así que no necesita la red de evicción de los hilos.
 async function writeOpens () {
   try {
-    if (!usingFallback && idb) { await idbSet(idb, OPENS_IDB_KEY, opens); return true }
-    localStorage.setItem(OPENS_LS_KEY, JSON.stringify(opens)); return true
+    if (!usingFallback && idb) { await idbSet(idb, opensKey(), opens); return true }
+    localStorage.setItem(opensKey(), JSON.stringify(opens)); return true
   } catch (e) { console.warn('[store] persist opens failed:', e); return false }
 }
 
@@ -178,7 +171,7 @@ function dropOldest (data, fraction = 0.2) {
 async function writeState () {
   if (usingFallback || !idb) {
     for (let attempt = 0; attempt < 8; attempt++) {
-      try { localStorage.setItem(KEY, JSON.stringify(state)); return true }
+      try { localStorage.setItem(threadsKey(), JSON.stringify(state)); return true }
       catch (e) {
         if (!isQuotaError(e)) { console.warn('[store] persist (ls) failed:', e); return false }
         if (!dropOldest(state, 0.2)) { console.warn('[store] quota — nada que evictar'); return false }
@@ -187,7 +180,7 @@ async function writeState () {
     return false
   }
   for (let attempt = 0; attempt < 8; attempt++) {
-    try { await idbSet(idb, IDB_KEY, state); return true }
+    try { await idbSet(idb, threadsKey(), state); return true }
     catch (e) {
       if (!isQuotaError(e)) { console.warn('[store] persist (idb) failed:', e); return false }
       if (!dropOldest(state, 0.2)) { console.warn('[store] quota — nada que evictar'); return false }
@@ -386,8 +379,37 @@ const handlers = {
 
   async clearAll () {
     await persist({})
-    try { localStorage.removeItem(KEY) } catch (_) { /* */ }
+    try { localStorage.removeItem(threadsKey()) } catch (_) { /* */ }
     return { ok: true }
+  },
+
+  // ----- multi-perfil -----
+  // El cliente fija el perfil activo ni bien conecta (con el id de @dotrino/identity); cada
+  // perfil tiene sus propios hilos/aperturas. Cambiar de perfil NO borra nada (recarga y re-init).
+  async setProfile ({ profileId }) {
+    const pid = profileId || null
+    if (pid === _pid) return { ok: true, profileId: _pid }
+    _pid = pid
+    if (idb) {
+      const t = await idbGet(idb, threadsKey()); state = (t && typeof t === 'object') ? t : {}
+      const o = await idbGet(idb, opensKey()); opens = (o && typeof o === 'object') ? o : {}
+    } else {
+      try { state = JSON.parse(localStorage.getItem(threadsKey()) || '{}') || {} } catch { state = {} }
+      try { opens = JSON.parse(localStorage.getItem(opensKey()) || '{}') || {} } catch { opens = {} }
+    }
+    return { ok: true, profileId: _pid }
+  },
+
+  // Borra SOLO el store del perfil activo. Se llama cuando el vault REVOCA el acceso de
+  // ese perfil (los datos vivían en el vault; la cache local de ESE perfil se limpia). Los
+  // demás perfiles quedan intactos.
+  async wipeProfile () {
+    state = {}; opens = {}
+    try {
+      if (idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}) }
+      else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()) }
+    } catch (_) { /* best-effort */ }
+    return { ok: true, profileId: _pid }
   },
 
   /** Tamaño total + por hilo. Útil para mostrar "uso de almacenamiento". */

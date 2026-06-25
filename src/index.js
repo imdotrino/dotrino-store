@@ -54,7 +54,7 @@ export class Store {
         if (event.source !== iframe.contentWindow) return
         const msg = event.data
         if (!msg || msg._ccs !== true) return
-        if (msg.type === 'ready') { clearTimeout(timeout); this._enableVault().finally(() => resolve(this)); return }
+        if (msg.type === 'ready') { clearTimeout(timeout); this._initProfile().then(() => this._enableVault()).finally(() => resolve(this)); return }
         if (msg.type === 'response') {
           const pending = this._pending.get(msg.id)
           if (!pending) return
@@ -96,6 +96,35 @@ export class Store {
       )
     })
   }
+
+  // ----- multi-perfil (opt-in vía options.identity) -----
+
+  /**
+   * Namespacea el store por el PERFIL activo de la identidad (cada perfil = sus propios
+   * hilos/aperturas). Y, al REVOCAR el acceso al vault de ese perfil, borra SOLO su store
+   * (los datos vivían en el vault; la caché local de ese perfil se limpia). Cambiar de perfil
+   * NO borra nada: la app recarga y vuelve a entrar acá con el nuevo perfil.
+   */
+  async _initProfile () {
+    if (!this._identity) return
+    try {
+      const p = this._identity.currentProfile ? await this._identity.currentProfile() : null
+      if (p?.id) { this._profileId = p.id; await this._call('setProfile', { profileId: p.id }) }
+    } catch (_) { /* sin perfil → namespace por defecto */ }
+    try {
+      if (this._identity.onVault && !this._vaultSub) {
+        this._vaultSub = this._identity.onVault((e) => {
+          if (e && (e.phase === 'revoked' || e.phase === 'unpaired')) {
+            this._vaultMode = false
+            this._call('wipeProfile').catch(() => {})
+          }
+        })
+      }
+    } catch (_) { /* sin eventos de vault */ }
+  }
+
+  /** Borra el store del perfil activo (manual; el caso normal es automático al revocar). */
+  wipeProfile () { return this._call('wipeProfile') }
 
   // ----- respaldo en el vault (opt-in vía options.identity) -----
 
