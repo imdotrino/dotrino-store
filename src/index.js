@@ -27,7 +27,15 @@ export class Store {
   }
 
   static async connect (options = {}) {
-    if (singleton) return singleton
+    // El `await ready()` también va en la rama del singleton: si NO, quien llega
+    // mientras el primero todavía está levantando el iframe recibe un store sin
+    // conectar, postea a un iframe que aún no escucha y su primer mensaje se
+    // PIERDE — la petición no falla, se queda colgada hasta el timeout (8 s).
+    // `ready()` es idempotente (cachea su promesa), así que esperarla es gratis.
+    // Salió al pasar @dotrino/support de jsDelivr a npm: desde entonces la app y
+    // la moneda comparten este módulo (antes eran dos instancias) y corren la
+    // carrera de verdad.
+    if (singleton) { await singleton.ready(); return singleton }
     singleton = new Store(options)
     await singleton.ready()
     return singleton
