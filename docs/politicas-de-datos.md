@@ -7,6 +7,11 @@
 >
 > No confundir con [`vinculacion-de-cuentas.md`](../../dotrino-vault/docs/vinculacion-de-cuentas.md),
 > que es entre cuentas **distintas** (dos caminos, sin fusión).
+>
+> ⚠️ **Sin retrocompatibilidad, por decisión del dueño (2026-07-27).** Dotrino está en pruebas:
+> no hay cuentas viejas que cuidar, ni datos que preservar, ni esquema que respetar. El
+> almacén arranca en una clave nueva (`threads.<pid>.v2`) y **lo anterior no se migra**. Es la
+> última ventana para romper el formato sin costo: se rompe ahora y se hace bien.
 
 ---
 
@@ -94,9 +99,9 @@ cuenta y tu bóveda. Se dice acá para que sea una decisión y no un descuido.
 Cerrada a propósito. Si un dato no encaja en ninguna, la conversación es «qué política le
 falta al catálogo», no «qué regla especial le hago a esta app».
 
-**Por defecto `log`**, que es la más conservadora: nunca pisa nada. Los ítems que ya existen
-(sin `pol`) se leen como `log`, que es estrictamente más seguro que el «gana el más nuevo» de
-hoy.
+**Por defecto `log`** al escribir sin declarar política: es la más conservadora, nunca pisa
+nada. (No es un modo de compatibilidad: los ítems del esquema viejo no se leen, se descartan
+con el `v1` entero.)
 
 ---
 
@@ -148,13 +153,15 @@ impedir.
 
 ## 6. Fases
 
-### B0 — El sobre (sin cambiar ningún comportamiento)
+### B0 — El sobre (esquema nuevo, se rompe el viejo)
 
-- [ ] `pol` / `wid` / `wseq` / `del` en el ítem, con `pol` por defecto `log`.
+- [ ] `pol` / `wid` / `wseq` / `del` **obligatorios** en el ítem (`pol` por defecto `log` al
+      escribir). Un ítem sin sobre es un error, no un caso a tolerar.
 - [ ] Contador `wseq` por miembro, persistido en el store del perfil; `wid` = la huella corta
       de la llave del miembro (`keyLabel`, la misma que ya se muestra en el acta).
-- [ ] Retrocompatible: un ítem viejo sin sobre se lee como `log`, y se le pone sobre al
-      re-escribirlo. Sin migración masiva.
+- [ ] **Clave nueva** `threads.<pid>.v2` y `opens.<pid>.v2`. **Nada se migra**: el `v1` se
+      ignora y se borra. Sin ruta de lectura del formato viejo — es lo que evita arrastrar
+      dos merges en paralelo para siempre.
 
 ### B1 — Mezcla por política
 
