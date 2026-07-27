@@ -47,6 +47,39 @@ Y un cuarto que no es del merge pero cuenta: **`opens` no se sincroniza** (`merg
 solo toca `threads`), así que el contador de aperturas es por aparato. Está bien que hoy sea
 así, pero si algún día se sincroniza **no puede ser un número que se pisa** (§2, `contador`).
 
+### Dónde vive esto (y por qué hoy está DUPLICADO)
+
+Esto es del pilar **`@dotrino/store`**, no de ninguna app: es el almacén compartido del
+ecosistema. Pero la misma regla de mezcla está escrita **dos veces, en dos repos**:
+
+| Dónde | Qué es | La regla |
+|---|---|---|
+| `dotrino-store/store/store.js:204` (`mergeThreads`) | el iframe de `store.dotrino.com` (IndexedDB del navegador). Lo usan el **sync a Drive** (`mergeForSync`) y el **`importThreads`** con el que el dispositivo respalda en la bóveda | gana el `ts` mayor |
+| `dotrino-vault/src/threadStore.js:76` (`importThreads`) | el daemon del PC, que se declara «backend **autoritativo**» y espeja a mano el modelo de `@dotrino/store` | gana el `ts` mayor (reimplementada) |
+
+**Dos implementaciones de la misma regla significa que el resultado de una mezcla depende de
+DÓNDE se mezcló.** Mientras las dos digan lo mismo por casualidad no se nota; en cuanto una
+cambie —que es exactamente lo que este documento propone— el navegador y la bóveda empiezan a
+converger a estados distintos. Y es justo lo que `CLAUDE.md` prohíbe: no se reimplementa a
+mano el subconjunto de un pilar dentro de otro repo.
+
+**Por eso la primera tarea de B1 no es cambiar la regla sino tener UNA.** El motor de mezcla
+va como módulo **puro** en `@dotrino/store` (sin DOM, sin `node:*`, sin disco) y lo importan
+los dos: el iframe y el daemon. Es el patrón que ya funcionó con
+`dotrino-vault/lib/src/enroll.js`, que comparten daemon, dispositivo-bóveda y el iframe
+vendorizado.
+
+El **sync a Drive** no tiene regla propia y no hay que tocarlo: recibe la función por
+`mergeFn` (`store/sync.js:343`). Eso ya está bien.
+
+**Y hay un tercer sitio donde el reloj decide**, fuera del store: la ficha del usuario (`me`)
+se resuelve con `remoteMe.updatedAt > me.updatedAt` (`dotrino-identity/vault/core.js:713`).
+Es un `registro` de manual y tiene que pasar por la misma política.
+
+**Recortes silenciosos, en los dos lados:** `trimThread` (`store.js:247`) y `trim`
+(`threadStore.js:25`) tiran lo más viejo pasadas 1.000 entradas por hilo, además del
+`dropOldest` por cuota. Mismo problema de fondo: se pierde contenido sin decírselo a nadie.
+
 ---
 
 ## 1. La unidad: un ítem con su política
@@ -165,7 +198,13 @@ impedir.
 
 ### B1 — Mezcla por política
 
+- [ ] **Primero: UNA sola implementación.** Motor de mezcla como módulo **puro** de
+      `@dotrino/store` (sin DOM, sin `node:*`, sin disco), importado por el iframe **y** por
+      `dotrino-vault/src/threadStore.js`, que hoy la reimplementa. Mientras haya dos, el
+      resultado depende de dónde se mezcló.
 - [ ] Reemplazar `mergeThreads` (`store/store.js:204`) por un merge que **despacha por `pol`**.
+- [ ] La ficha del usuario (`me`) pasa a `registro`: se cae el
+      `remoteMe.updatedAt > me.updatedAt` de `dotrino-identity/vault/core.js:713`.
 - [ ] Implementar las cinco políticas de §2, cada una con su test.
 - [ ] **Test de determinismo**: aplicar el mismo conjunto de escrituras en órdenes distintos
       (y por duplicado) tiene que dar el **mismo** estado, byte a byte.
@@ -191,6 +230,8 @@ impedir.
 ### B5 — Cuota
 
 - [ ] `dropOldest` deja de correr solo; error claro + evento.
+- [ ] Lo mismo con el tope de 1.000 entradas por hilo, que recorta callado en los **dos**
+      lados (`trimThread`, `store.js:247`; `trim`, `dotrino-vault/src/threadStore.js:25`).
 
 ### B6 — Encaje con el cifrado
 
