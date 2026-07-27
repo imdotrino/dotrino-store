@@ -47,10 +47,25 @@ Y un cuarto que no es del merge pero cuenta: **`opens` no se sincroniza** (`merg
 solo toca `threads`), así que el contador de aperturas es por aparato. Está bien que hoy sea
 así, pero si algún día se sincroniza **no puede ser un número que se pisa** (§2, `contador`).
 
-### Dónde vive esto (y por qué hoy está DUPLICADO)
+### Qué guarda el store, y qué NO
 
-Esto es del pilar **`@dotrino/store`**, no de ninguna app: es el almacén compartido del
-ecosistema. Pero la misma regla de mezcla está escrita **dos veces, en dos repos**:
+**`@dotrino/store` es para contenido: mensajes y multimedia** — más el contador de aperturas
+del hub. **La ficha del perfil no es suya**: el apodo, el avatar y los datos del usuario viven
+en `@dotrino/identity` y su copia autoritativa está en la bóveda (`profileSet`/`profileGet`,
+`dotrino-vault/src/threadStore.js`), no en `store.dotrino.com`.
+
+Por eso este catálogo es un **vocabulario compartido**, no un módulo que se traga todo: cada
+almacén aplica las políticas a lo suyo.
+
+| Almacén | Qué guarda | Políticas que le tocan |
+|---|---|---|
+| `@dotrino/store` (iframe) | mensajes, multimedia, aperturas | `log`, `archivo`, `contador`, `conjunto` |
+| `dotrino-vault` (`threadStore.js`) | la copia autoritativa de lo anterior cuando la cuenta vive en la bóveda | las mismas, y **tienen que ser las mismas** |
+| `@dotrino/identity` + bóveda | la **ficha** (`me`: apodo, avatar, datos) | `registro` |
+
+El motor de mezcla es uno solo y compartido; los datos, de cada quien.
+
+### El merge está DUPLICADO (dos repos, la misma regla escrita dos veces)
 
 | Dónde | Qué es | La regla |
 |---|---|---|
@@ -72,9 +87,10 @@ vendorizado.
 El **sync a Drive** no tiene regla propia y no hay que tocarlo: recibe la función por
 `mergeFn` (`store/sync.js:343`). Eso ya está bien.
 
-**Y hay un tercer sitio donde el reloj decide**, fuera del store: la ficha del usuario (`me`)
-se resuelve con `remoteMe.updatedAt > me.updatedAt` (`dotrino-identity/vault/core.js:713`).
-Es un `registro` de manual y tiene que pasar por la misma política.
+**Y hay un tercer sitio donde el reloj decide**, que **no es del store** pero usa la misma
+regla mala: la ficha del usuario (`me`) se resuelve con `remoteMe.updatedAt > me.updatedAt`
+(`dotrino-identity/vault/core.js:713`). Es un `registro` de manual, y le toca a identity —
+mismo vocabulario, otro dueño y otro repo.
 
 **Recortes silenciosos, en los dos lados:** `trimThread` (`store.js:247`) y `trim`
 (`threadStore.js:25`) tiran lo más viejo pasadas 1.000 entradas por hilo, además del
@@ -170,7 +186,30 @@ marcada con quién y cuándo.
 
 ---
 
-## 5. La cuota avisa, no evicta
+## 5. Caducar ≠ evictar (y hoy se confunden)
+
+Son dos cosas distintas que hoy se ven iguales porque solo existe la segunda:
+
+- **Caducar** es *por diseño*: un dato nace diciendo cuánto vive («este mensaje se borra en 24
+  h», los anuncios efímeros de `trueque`). Es una **política del dato**, predecible, igual en
+  todos los aparatos, y el usuario la conoce de antemano. Se implementa como una lápida (§3)
+  que se escribe sola al vencer el plazo.
+- **Evictar** es *por falta de espacio*: se tira lo que sea para que quepa lo demás. Depende
+  del disco de cada aparato, así que **da resultados distintos en cada uno** y rompe la
+  convergencia: lo que un teléfono evicta, otro lo devuelve en la siguiente mezcla.
+
+**Comprobado en el código (2026-07-27): hoy no hay mensajes efímeros.** No existe `ttl` ni
+`expiresAt` en el store ni en el messenger, y `dropOldest` es explícitamente una red ante
+`QuotaExceededError` (`store/store.js:151`, desde el commit inicial), no una regla de
+caducidad. Lo mismo el tope de 1.000 por hilo.
+
+Así que la decisión se parte en dos:
+
+- [ ] **Si se quieren mensajes efímeros, se diseñan como TTL declarado** en el sobre
+      (`exp`), no como un efecto colateral de la cuota. Pendiente de decidir si hace falta.
+- [ ] **La eviction por cuota, mientras tanto, deja de ser silenciosa** (§5.1).
+
+## 5.1 La cuota avisa, no evicta
 
 `dropOldest` tira el 20 % más viejo cuando el backend se queda sin espacio, sin decir nada.
 Eso es perder datos del usuario en silencio, que es justo lo que este documento existe para
