@@ -25,6 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Inyectar meta de commit
+        run: |
+          COMMIT=${GITHUB_SHA::7}
+          sed -i "s|</head>|  <meta name=\"commit\" content=\"$COMMIT\" />\\n</head>|" store/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
