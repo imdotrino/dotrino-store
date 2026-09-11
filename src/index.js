@@ -122,7 +122,14 @@ export class Store {
     try {
       if (this._identity.onVault && !this._vaultSub) {
         this._vaultSub = this._identity.onVault((e) => {
-          if (e && (e.phase === 'revoked' || e.phase === 'unpaired')) {
+          if (!e) return
+          // SOLTAR LA BÓVEDA NO ES QUE TE ECHEN, y hasta 0.7.0 las dos cosas borraban
+          // igual: `vaultUnpair()` es una decisión del dueño —«esta cuenta se queda en
+          // este aparato»— y se llevaba por delante todos sus hilos sin avisar. El
+          // borrado es solo para la expulsión, que llega FIRMADA (`revoked`) y sí deja
+          // huérfana la caché: esos datos vivían en una cuenta que ya no es de aquí.
+          if (e.phase === 'unpaired') { this._vaultMode = false; return }
+          if (e.phase === 'revoked') {
             this._vaultMode = false
             this._call('wipeProfile').catch(() => {})
           }

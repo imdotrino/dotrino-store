@@ -114,7 +114,29 @@ function idbSet (db, key, val) {
   })
 }
 
-// Inicializa el backend: abre IndexedDB, carga el estado y migra (una vez) los
+/**
+ * ADOPTA LO QUE GUARDÓ LA VERSIÓN ANTERIOR A IndexedDB.
+ *
+ * Esto existió, y el 2026-06-25 el commit que metió el namespace por perfil se lo
+ * llevó por delante sin que nadie lo notara: a partir de ahí, todo el que tenía hilos
+ * en `cc.store.threads.v1` los perdía EN SILENCIO al actualizar. La prueba que lo
+ * detectaba llevaba desde entonces en rojo porque nadie corría la suite.
+ *
+ * Se adopta para el perfil que lo mire primero, y la clave vieja se borra: no había
+ * varios perfiles cuando se escribió, así que esos datos son de uno solo y duplicarlos
+ * en cada cuenta sería peor que perderlos.
+ */
+async function adoptarLegado (lsKey, actual) {
+  if (actual && Object.keys(actual).length) return actual   // ya hay algo: no se pisa
+  let viejo = null
+  try { const raw = localStorage.getItem(lsKey); viejo = raw ? JSON.parse(raw) : null } catch (_) { return actual }
+  if (!viejo || typeof viejo !== 'object' || !Object.keys(viejo).length) return actual
+  try { localStorage.removeItem(lsKey) } catch (_) { /* se adopta igual */ }
+  console.log('[cc-store] adopted what the version before IndexedDB had saved:', lsKey)
+  return viejo
+}
+
+// Inicializa el backend: abre IndexedDB, carga el estado y adopta (una vez) los
 // datos del localStorage viejo si IndexedDB está vacío. Si IndexedDB no está
 // disponible (p.ej. modo privado), cae a localStorage para no perder función.
 async function init () {
@@ -123,17 +145,21 @@ async function init () {
     idb = await openIdb()
     const stored = await idbGet(idb, threadsKey())
     state = (stored && typeof stored === 'object') ? stored : {}
+    state = await adoptarLegado(KEY, state)
+    if (Object.keys(state).length) await idbSet(idb, threadsKey(), state).catch(() => {})
   } catch (e) {
     console.warn('[cc-store] IndexedDB no disponible, uso localStorage:', e)
     usingFallback = true
     idb = null
     try { const raw = localStorage.getItem(threadsKey()); state = raw ? JSON.parse(raw) : {} } catch { state = {} }
+    state = await adoptarLegado(KEY, state)
   }
   // Carga el contador de aperturas (namespace aparte de los hilos).
   try {
     const stored = idb ? await idbGet(idb, opensKey()) : JSON.parse(localStorage.getItem(opensKey()) || 'null')
     opens = (stored && typeof stored === 'object') ? stored : {}
   } catch (_) { opens = {} }
+  if (opensKey() !== OPENS_LS_KEY) opens = await adoptarLegado(OPENS_LS_KEY, opens)
 }
 initPromise = init()
 
