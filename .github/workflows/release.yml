@@ -38,6 +38,13 @@ jobs:
       - run: npm i -g npm@latest
       - run: npm ci
 
+      # La suite es de navegador (Playwright), y el navegador hay que bajarlo aparte:
+      # el `.npmrc` del ecosistema lleva `ignore-scripts=true` (CONVENCIONES §1.1), así
+      # que el postinstall que normalmente lo trae no corre. Sin este paso, `npm test`
+      # falla con «Executable doesn't exist» y la release no sale — que es exactamente
+      # lo que le pasó a la v0.8.0.
+      - run: npx playwright install --with-deps chromium
+
       # LAS PRUEBAS ANTES DE PUBLICAR. Una versión que no pasa su suite no llega a npm.
       - run: npm test
 
