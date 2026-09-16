@@ -10,7 +10,8 @@ const root = fileURLToPath(new URL('../store/', import.meta.url))
 // El CLIENTE (`src/`) y las páginas de prueba (`test/fixtures/`) también se sirven: los
 // tests del saludo necesitan cargar el cliente en una página que NO es la del store.
 const repo = fileURLToPath(new URL('../', import.meta.url))
-const fromRepo = (path) => path.startsWith('/src/') || path.startsWith('/test/fixtures/')
+// `/store/core.js` también desde el repo: el cliente lo importa como `../store/core.js`.
+const fromRepo = (path) => path.startsWith('/src/') || path.startsWith('/test/fixtures/') || path.startsWith('/store/')
 const port = Number(process.env.PORT) || 8137
 const types = {
   '.html': 'text/html; charset=utf-8',

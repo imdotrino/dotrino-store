@@ -73,9 +73,43 @@ store.profileId   // 'p2419686e' — o null si se conectó sin identidad
 - **Otro perfil se rechaza.** Si el almacén ya está atado a un perfil y llega una identidad de otro, `connect` lanza con `code: 'store-identity-mismatch'`.
 - **Sin perfil no se abre.** Si la identidad no tiene perfil activo, `connect` lanza con `code: 'store-no-profile'`. Antes se caía al espacio por defecto en silencio.
 
+## Respaldo en la bóveda (desde 0.11.0)
+
+Si el perfil está emparejado con una bóveda (`dotrino-vault` ≥ 0.115.0), lo que guardas se respalda en ella. Hasta 0.10.0 el almacén mandaba **todo** en un mensaje, el proxio corta los mensajes en 1 MB, y pasado ese tamaño el respaldo dejaba de llegar con el error tragado en un `catch` vacío. Ahora:
+
+- **Se lee y se escribe siempre en el navegador.** Responde al instante y sin conexión; abrir el almacén **no espera** a la bóveda.
+- **Lo escrito sube por detrás**, en tandas de menos de 1 MB. Si no sube, queda en `pending` y se reintenta.
+- **Ponerse al día compara una huella por hilo** y solo trabaja los que difieren: baja el índice (id y `ts`) y pide únicamente las entradas que faltan en cada lado. Al volver a la pestaña (tras un minuto) y cada 5 minutos con la pestaña a la vista.
+- **Los borrados dejan lápida**, así no vuelven desde la bóveda ni desde otro aparato. La lápida guarda el `ts` de lo borrado: una edición posterior sí entra. Se olvida a los 180 días.
+- **Nada viaja en claro**: `identity.vaultStore` cifra con la clave de contenido del perfil y, si el aparato aún no la tiene, falla con `no-content-key` (`@dotrino/identity` ≥ 0.91.0).
+- **Las reglas viven en un solo sitio**: `store/core.js` (export `@dotrino/store/core`), que usan la página y la bóveda.
+
+```js
+const store = await Store.connect({ identity, maxPerThread: 50000 })
+
+store.vault
+// → { state: 'off' | 'syncing' | 'synced' | 'error',
+//     reason: 'no-identity' | 'not-paired' | 'revoked' | null,
+//     error: { code, message } | null,   // no-content-key · vault-no-reply · vault-outdated …
+//     lastSyncAt, pending, tooLarge }
+store.vaultBacked          // true si está al día y sin nada pendiente
+
+store.on('vault', (s) => { if (s.state === 'synced' && s.changed.length) recargar(s.changed) })
+await store.vaultSync()    // «Sincronizar ahora»: lanza con `code` si no se pudo
+```
+
+`maxPerThread` va en `connect` y no después: se aplica **antes** de la primera sincronización, que si no podría recortar lo que baja.
+
+Límites que se saben:
+
+- Una entrada de más de ~550 KB no cabe por el proxio ni sola: no se respalda y aparece en `tooLarge`.
+- Un aparato apagado más de 180 días puede resucitar lo que se borró mientras tanto.
+- `importThreads(..., 'replace')` no deja lápidas de lo que desaparece.
+- Una reescritura con el **mismo** `ts` y otro contenido no cambia la huella: reescribir tiene que subir `ts` (`appendMessage` sin `ts` lo pone solo).
+
 ## Garantías
 
-- **Per-thread cap**: 1000 mensajes por defecto, configurable con `setMaxPerThread(n)`. El más antiguo se descarta al añadir uno nuevo si pasa el cap.
+- **Per-thread cap**: 1000 mensajes por defecto, configurable con `setMaxPerThread(n)` o `connect({ maxPerThread })` (hasta 50 000). El más antiguo se descarta al añadir uno nuevo si pasa el cap.
 - **Eviction global ante `QuotaExceededError`**: solo como red de seguridad (con IndexedDB es prácticamente inalcanzable). Descarta el 20% más antiguo a través de todos los hilos y reintenta hasta 8 veces.
 - **No sale del navegador**: nunca se hace fetch, no hay servidor, no hay analytics (salvo el sync opcional a tu Drive, off por defecto).
 
@@ -90,6 +124,8 @@ IndexedDB `cc-store` → object store `kv` → key `threads.v1`:
 ```
 value: JSON { [threadKey: string]: ThreadEntry[] }
 ```
+
+Por perfil, las claves llevan su id: `threads.<perfil>.v1`, `opens.<perfil>.v1` y `tombs.<perfil>.v1` (lápidas: `{ [threadKey]: { [id]: [ts, at] } }`).
 
 Las entradas son objetos opacos para el store; solo se les pide `id` y `ts` para deduplicación y ordenamiento.
 

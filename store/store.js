@@ -13,7 +13,7 @@
 
 // Lo que esta página anuncia al saludar. No es la versión del paquete npm: es la del
 // diálogo por `postMessage`, que solo sube cuando ese diálogo cambia.
-const STORE_VERSION = '0.2.0'
+const STORE_VERSION = '0.3.0'
 
 // Polyfill de crypto.randomUUID: en contextos no seguros (p.ej. cuando este
 // iframe se carga desde una página padre HTTP o desde un contexto sin secure
@@ -48,6 +48,7 @@ try {
 } catch (e) { console.warn('[cc-store] context log failed', e) }
 
 import { createSync } from './sync.js'
+import * as core from './core.js'
 
 const KEY = 'cc.store.threads.v1'          // clave del localStorage VIEJO (migración)
 const IDB_NAME = 'cc-store'
@@ -57,6 +58,9 @@ const IDB_KEY = 'threads.v1'
 // APARTE de los hilos de mensajes: así no contamina getThreadSummaries/sync.
 const OPENS_IDB_KEY = 'opens.v1'
 const OPENS_LS_KEY = 'cc.store.opens.v1'
+// Lápidas de lo borrado (ver `core.js`): sin ellas, un borrado vuelve desde la bóveda o
+// desde otro aparato en la siguiente sincronización.
+const TOMBS_IDB_KEY = 'tombs.v1'
 const MAX_PER_THREAD_DEFAULT = 1000
 let maxPerThread = MAX_PER_THREAD_DEFAULT
 let sync = null
@@ -65,6 +69,7 @@ let sync = null
 let _pid = null
 const threadsKey = () => _pid ? `threads.${_pid}.v1` : IDB_KEY
 const opensKey = () => _pid ? `opens.${_pid}.v1` : OPENS_IDB_KEY
+const tombsKey = () => _pid ? `tombs.${_pid}.v1` : TOMBS_IDB_KEY
 
 // ----- persistencia en IndexedDB -------------------------------------------
 //
@@ -80,6 +85,7 @@ const opensKey = () => _pid ? `opens.${_pid}.v1` : OPENS_IDB_KEY
 let idb = null
 let state = {}            // copia de trabajo en memoria
 let opens = {}            // { [appId]: { count, ts } } — contador de aperturas
+let tombs = {}            // { [threadKey]: { [id]: [ts, at] } } — lo borrado
 let usingFallback = false // true si IndexedDB no está disponible (→ localStorage)
 let initPromise = null
 
@@ -164,6 +170,20 @@ async function init () {
     opens = (stored && typeof stored === 'object') ? stored : {}
   } catch (_) { opens = {} }
   if (opensKey() !== OPENS_LS_KEY) opens = await adoptarLegado(OPENS_LS_KEY, opens)
+  await loadTombs()
+}
+
+async function loadTombs () {
+  const stored = idb ? await idbGet(idb, tombsKey()) : JSON.parse(localStorage.getItem(tombsKey()) || 'null')
+  tombs = (stored && typeof stored === 'object') ? stored : {}
+  if (core.pruneTombs(tombs, Date.now())) await writeTombs()
+}
+
+// Las lápidas se escriben con los hilos: si no se guardan, el borrado resucita al sincronizar.
+// Por eso aquí un fallo se LANZA, no se anota y se sigue.
+async function writeTombs () {
+  if (!usingFallback && idb) { await idbSet(idb, tombsKey(), tombs); return }
+  localStorage.setItem(tombsKey(), JSON.stringify(tombs))
 }
 initPromise = init()
 
@@ -233,30 +253,8 @@ async function persist (data, { silent = false } = {}) {
 
 function mergeThreads (localThreads, remoteThreads) {
   const out = { ...localThreads }
-  let changed = false
-  const allKeys = new Set([...Object.keys(localThreads || {}), ...Object.keys(remoteThreads || {})])
-  for (const k of allKeys) {
-    const a = localThreads[k] || []
-    const b = remoteThreads[k] || []
-    if (b.length === 0) continue
-    if (a.length === 0) { out[k] = [...b].sort((x, y) => (x.ts || 0) - (y.ts || 0)); changed = true; continue }
-    const byId = new Map()
-    for (const e of a) if (e?.id) byId.set(e.id, e)
-    let added = 0
-    for (const e of b) {
-      if (!e?.id) continue
-      const prev = byId.get(e.id)
-      if (!prev) { byId.set(e.id, e); added++ }
-      else if ((e.ts || 0) > (prev.ts || 0)) { byId.set(e.id, e); added++ }
-    }
-    if (added > 0) {
-      const merged = Array.from(byId.values()).sort((x, y) => (x.ts || 0) - (y.ts || 0))
-      if (merged.length > maxPerThread) merged.splice(0, merged.length - maxPerThread)
-      out[k] = merged
-      changed = true
-    }
-  }
-  return { merged: out, changed }
+  const changed = core.mergeEntries(out, tombs, remoteThreads, { mode: 'merge', max: maxPerThread })
+  return { merged: out, changed: changed.size > 0 }
 }
 
 async function exportLocalForSync () {
@@ -273,9 +271,6 @@ async function mergeForSync (local, remote) {
   if (!remote) return { merged: local, changed: false }
   const { merged, changed } = mergeThreads(local.threads || {}, remote.threads || {})
   return { merged: { threads: merged }, changed }
-}
-function trimThread (arr, cap) {
-  if (arr.length > cap) arr.splice(0, arr.length - cap)
 }
 
 // ----- handlers -----
@@ -309,13 +304,42 @@ const handlers = {
   // ----- export / import (used by sync, also exposed to apps) -----
 
   async exportThreads () { return { threads: loadAll() } },
-  async importThreads ({ threads, mode = 'merge' }) {
+  /**
+   * `merge`: gana el `ts` mayor. `upsert`: con el mismo `ts` gana lo que llega. `tombs`
+   * ({ [threadKey]: [[id, ts, at]] }) entierra antes de mezclar. `changed`: los hilos que
+   * cambiaron, para que quien sincroniza sepa qué avisar.
+   */
+  async importThreads ({ threads = {}, tombs: incomingTombs, mode = 'merge' }) {
     if (!threads || typeof threads !== 'object') throw new Error('threads required')
-    if (mode === 'replace') { await persist(threads); return { mode, count: Object.keys(threads).length } }
-    const local = loadAll()
-    const { merged } = mergeThreads(local, threads)
-    await persist(merged)
-    return { mode, count: Object.keys(merged).length }
+    if (mode === 'replace') { await persist(threads); return { mode, count: Object.keys(threads).length, changed: Object.keys(threads) } }
+    if (mode !== 'merge' && mode !== 'upsert') throw new Error(`unknown import mode: ${mode}`)
+    const data = loadAll()
+    const buried = core.applyTombs(data, tombs, incomingTombs, Date.now())
+    const merged = core.mergeEntries(data, tombs, threads, { mode, max: maxPerThread })
+    const changed = new Set([...buried.changed, ...merged])
+    if (buried.tombsChanged) await writeTombs()
+    if (changed.size) await persist(data)
+    return { mode, count: Object.keys(data).length, changed: [...changed] }
+  },
+
+  // ----- sincronizar con la bóveda por partes (lo usa el cliente, ver src/vault-sync.js) -----
+
+  async getThreadDigests ({ keys } = {}) { return core.digestsOf(loadAll(), keys) },
+
+  /** Índice completo (ids, ts y lápidas) de los hilos pedidos, y el tope por hilo vigente. */
+  async getThreadIndexes ({ keys }) {
+    if (!Array.isArray(keys)) throw new Error('keys required')
+    return { indexes: core.indexPage(loadAll(), tombs, keys, null, Infinity).indexes, max: maxPerThread }
+  },
+
+  /** Las entradas pedidas por id y las lápidas de `tombRefs` / de los hilos `tombKeys`. */
+  async getEntries ({ refs, tombRefs, tombKeys }) {
+    return { threads: core.entriesPage(loadAll(), refs, Infinity).threads, tombs: core.pickTombs(tombs, tombRefs, tombKeys) }
+  },
+
+  async mergeOpens ({ opens: incoming }) {
+    if (core.mergeOpens(opens, incoming)) await writeOpens()
+    return { ...opens }
   },
 
   // ----- Drive sync -----
@@ -338,22 +362,14 @@ const handlers = {
 
 
   async setMaxPerThread ({ max }) {
-    maxPerThread = Math.max(1, Math.min(50000, Number(max) || MAX_PER_THREAD_DEFAULT))
+    maxPerThread = Math.max(1, Math.min(core.MAX_PER_THREAD_LIMIT, Number(max) || MAX_PER_THREAD_DEFAULT))
     return { maxPerThread }
   },
 
   async appendMessage ({ threadKey, entry }) {
-    if (!threadKey || typeof threadKey !== 'string') throw new Error('threadKey required')
-    if (!entry || typeof entry !== 'object') throw new Error('entry required')
-    if (!entry.id) entry.id = crypto.randomUUID()
-    if (!entry.ts) entry.ts = Date.now()
     const data = loadAll()
-    if (!data[threadKey]) data[threadKey] = []
-    // Dedup por id
-    const existing = data[threadKey].findIndex(e => e.id === entry.id)
-    if (existing >= 0) data[threadKey][existing] = { ...data[threadKey][existing], ...entry }
-    else data[threadKey].push(entry)
-    trimThread(data[threadKey], maxPerThread)
+    const { tombCleared } = core.writeEntry(data, tombs, threadKey, entry, { max: maxPerThread, now: Date.now(), newId: () => crypto.randomUUID() })
+    if (tombCleared) await writeTombs()
     await persist(data)
     return entry
   },
@@ -388,29 +404,29 @@ const handlers = {
   },
 
   async removeThread ({ threadKey }) {
-    if (!threadKey) return { removed: 0 }
     const data = loadAll()
-    const removed = data[threadKey]?.length || 0
-    delete data[threadKey]
-    await persist(data)
+    const removed = core.removeWholeThread(data, tombs, threadKey, Date.now())
+    if (removed) { await writeTombs(); await persist(data) }
     return { removed }
   },
 
   async removeMessage ({ threadKey, id }) {
-    if (!threadKey || !id) return { removed: 0 }
     const data = loadAll()
-    const arr = data[threadKey] || []
-    const before = arr.length
-    data[threadKey] = arr.filter(e => e.id !== id)
-    if (data[threadKey].length === 0) delete data[threadKey]
-    await persist(data)
-    return { removed: before - (data[threadKey]?.length || 0) }
+    const removed = core.removeEntry(data, tombs, threadKey, id, Date.now())
+    if (removed) { await writeTombs(); await persist(data) }
+    return { removed }
   },
 
+  /** Borra todos los hilos del perfil, con lápida: `keys` son los que había, para propagarlo. */
   async clearAll () {
+    const data = loadAll()
+    const keys = Object.keys(data)
+    const now = Date.now()
+    for (const k of keys) core.removeWholeThread(data, tombs, k, now)
+    await writeTombs()
     await persist({})
     try { localStorage.removeItem(threadsKey()) } catch (_) { /* */ }
-    return { ok: true }
+    return { ok: true, keys }
   },
 
   // ----- multi-perfil -----
@@ -427,6 +443,7 @@ const handlers = {
       try { state = JSON.parse(localStorage.getItem(threadsKey()) || '{}') || {} } catch { state = {} }
       try { opens = JSON.parse(localStorage.getItem(opensKey()) || '{}') || {} } catch { opens = {} }
     }
+    await loadTombs()
     return { ok: true, profileId: _pid }
   },
 
@@ -434,10 +451,10 @@ const handlers = {
   // ese perfil (los datos vivían en el vault; la cache local de ESE perfil se limpia). Los
   // demás perfiles quedan intactos.
   async wipeProfile () {
-    state = {}; opens = {}
+    state = {}; opens = {}; tombs = {}
     try {
-      if (idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}) }
-      else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()) }
+      if (idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}); await idbSet(idb, tombsKey(), {}) }
+      else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()); localStorage.removeItem(tombsKey()) }
     } catch (_) { /* best-effort */ }
     return { ok: true, profileId: _pid }
   },
@@ -508,7 +525,7 @@ window.addEventListener('message', async (event) => {
     await initPromise            // backend (IndexedDB) listo antes de servir
     reply({ result: await handler(params || {}) })
   }
-  catch (e) { reply({ error: e?.message || String(e) }) }
+  catch (e) { reply({ error: e?.message || String(e), code: e?.code || null }) }
 })
 
 // Notify parent we are ready

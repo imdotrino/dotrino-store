@@ -7,7 +7,11 @@
  * extensión + tabs) en el mismo navegador comparten los mismos hilos.
  */
 
+import { VaultSync } from './vault-sync.js'
+
 let singleton = null
+
+const OFF_WITHOUT_IDENTITY = Object.freeze({ state: 'off', reason: 'no-identity', error: null, lastSyncAt: null, pending: 0, tooLarge: [] })
 
 function codeError (code, message) {
   const e = new Error(message)
@@ -28,12 +32,11 @@ export class Store {
     this._handler = null
     this._pending = new Map()
     this._nextId = 1
-    // Si pasás una Identity emparejada (options.identity), el store se respalda EN tu
-    // vault: el iframe (IndexedDB) queda como CACHÉ y la fuente de verdad es tu bóveda.
-    // Opt-in y retrocompatible: sin identity, comportamiento idéntico al de hoy (local).
+    // Con una identidad emparejada (options.identity), lo que guardas se respalda EN tu
+    // bóveda por detrás (ver `vault-sync.js`). Se lee y se escribe siempre en el navegador.
     this._identity = options.identity || null
-    this._vaultMode = false
-    this._vaultDirty = false // hay escrituras locales sin subir al vault (se hicieron offline)
+    this._maxPerThread = options.maxPerThread ?? null
+    this._vaultSync = null
   }
 
   static async connect (options = {}) {
@@ -53,6 +56,7 @@ export class Store {
     // espacio común de todos los perfiles del aparato. Ahora el almacén la adopta.
     if (singleton) {
       await singleton.ready()
+      if (options.maxPerThread != null) await singleton.setMaxPerThread(options.maxPerThread)
       if (options.identity) await singleton._adoptIdentity(options.identity)
       return singleton
     }
@@ -78,7 +82,7 @@ export class Store {
       return
     }
     this._identity = identity
-    this._adopting = this._initProfile().then(() => this._enableVault()).catch((e) => {
+    this._adopting = this._initProfile().then(() => this._startVault()).catch((e) => {
       this._identity = null
       this._adopting = null
       this._profileId = null
@@ -134,7 +138,11 @@ export class Store {
           stopAsking()
           // Si no se puede atar al perfil, abrir falla: un almacén que responde pero guarda
           // en el espacio de otro es peor que uno que no abre.
-          this._initProfile().then(() => this._enableVault()).then(() => resolve(this), reject)
+          // La bóveda NO se espera: abrir el almacén es local, y ponerse al día con ella
+          // puede tardar lo que tarde la red. Su estado se ve en `vault` y en el evento.
+          this._applyMaxPerThread()
+            .then(() => this._initProfile())
+            .then(() => { this._startVault(); resolve(this) }, reject)
           return
         }
         if (msg.type === 'response') {
@@ -142,7 +150,7 @@ export class Store {
           if (!pending) return
           this._pending.delete(msg.id)
           clearTimeout(pending.timer)
-          if (msg.error) pending.reject(new Error(msg.error))
+          if (msg.error) pending.reject(msg.code ? codeError(msg.code, msg.error) : new Error(msg.error))
           else pending.resolve(msg.result)
           return
         }
@@ -157,6 +165,8 @@ export class Store {
   }
 
   destroy () {
+    this._vaultSync?.stop('destroyed')
+    this._vaultSync = null
     if (this._handler) window.removeEventListener('message', this._handler)
     if (this._iframe?.parentNode) this._iframe.parentNode.removeChild(this._iframe)
     clearInterval(this._hello)
@@ -204,102 +214,107 @@ export class Store {
     const r = await this._call('setProfile', { profileId: p.id })
     if (r?.profileId !== p.id) throw codeError('store-no-profile', `the store did not switch to profile ${p.id}`)
     this._profileId = p.id
-    try {
-      if (this._identity.onVault && !this._vaultSub) {
-        this._vaultSub = this._identity.onVault((e) => {
-          if (!e) return
-          // SOLTAR LA BÓVEDA NO ES QUE TE ECHEN, y hasta 0.7.0 las dos cosas borraban
-          // igual: `vaultUnpair()` es una decisión del dueño —«esta cuenta se queda en
-          // este aparato»— y se llevaba por delante todos sus hilos sin avisar. El
-          // borrado es solo para la expulsión, que llega FIRMADA (`revoked`) y sí deja
-          // huérfana la caché: esos datos vivían en una cuenta que ya no es de aquí.
-          if (e.phase === 'unpaired') { this._vaultMode = false; return }
-          if (e.phase === 'revoked') {
-            this._vaultMode = false
-            this._call('wipeProfile').catch(() => {})
-          }
-        })
-      }
-    } catch (_) { /* sin eventos de vault */ }
+    if (typeof this._identity.onVault === 'function' && !this._vaultSub) {
+      this._vaultSub = this._identity.onVault((e) => {
+        if (!e) return
+        if (e.phase === 'paired' || e.phase === 'adopted') { this._vaultSync?.start(); return }
+        // SOLTAR LA BÓVEDA NO ES QUE TE ECHEN, y hasta 0.7.0 las dos cosas borraban
+        // igual: `vaultUnpair()` es una decisión del dueño —«esta cuenta se queda en
+        // este aparato»— y se llevaba por delante todos sus hilos sin avisar. El
+        // borrado es solo para la expulsión, que llega FIRMADA (`revoked`) y sí deja
+        // huérfana la caché: esos datos vivían en una cuenta que ya no es de aquí.
+        if (e.phase === 'unpaired') { this._vaultSync?.stop('not-paired'); return }
+        if (e.phase === 'revoked') {
+          this._vaultSync?.stop('revoked')
+          this._call('wipeProfile').catch((err) => console.error('[dotrino-store] wipe after revocation failed:', err))
+        }
+      })
+    }
   }
 
   /** Borra el store del perfil activo (manual; el caso normal es automático al revocar). */
   wipeProfile () { return this._call('wipeProfile') }
 
-  // ----- respaldo en el vault (opt-in vía options.identity) -----
+  // ----- respaldo en la bóveda (con options.identity) -----
 
-  /** Comprueba el emparejamiento y reconcilia (merge idempotente por id) caché ↔ vault. */
-  async _enableVault () {
+  /** Arranca el respaldo por detrás. No se espera ni lanza: su estado está en `vault`. */
+  _startVault () {
     if (!this._identity) return
-    try {
-      const st = await this._identity.vaultStatus()
-      if (!st?.paired) { this._vaultMode = false; return }
-      this._vaultMode = true
-      const localExp = await this._call('exportThreads')
-      if (localExp?.threads && Object.keys(localExp.threads).length) {
-        await this._identity.vaultStore('importThreads', { threads: localExp.threads, mode: 'merge' })
-      }
-      const vaultExp = await this._identity.vaultStore('exportThreads')
-      if (vaultExp?.threads && Object.keys(vaultExp.threads).length) {
-        await this._call('importThreads', { threads: vaultExp.threads, mode: 'merge' })
-      }
-      this._vaultDirty = false
-    } catch (_) { this._vaultMode = false } // vault apagado → modo local (caché)
+    if (!this._vaultSync) {
+      this._vaultSync = new VaultSync({
+        call: (method, params) => this._call(method, params),
+        identity: this._identity,
+        emit: (status, extra) => this._emit('vault', { ...status, changed: extra?.changed || [] })
+      })
+    }
+    this._vaultSync.start()
   }
 
-  /** ¿El store está respaldado en tu vault ahora mismo? */
-  get vaultBacked () { return this._vaultMode }
+  /**
+   * Estado del respaldo en la bóveda:
+   * `state`: `off` (con `reason`: `no-identity` · `not-paired` · `revoked`) · `syncing` ·
+   * `synced` · `error` (con `error.code` y `error.message`). `pending`: cambios de este
+   * navegador que aún no llegaron a la bóveda. `lastSyncAt`: la última vez que quedó al día.
+   */
+  get vault () { return this._vaultSync ? this._vaultSync.status : { ...OFF_WITHOUT_IDENTITY } }
 
-  /** Si hubo escrituras offline, sube la caché completa al vault (merge) en cuanto vuelve. */
-  async _flushDirty () {
-    if (!this._vaultMode || !this._vaultDirty) return
-    try {
-      const exp = await this._call('exportThreads')
-      if (exp?.threads && Object.keys(exp.threads).length) await this._identity.vaultStore('importThreads', { threads: exp.threads, mode: 'merge' })
-      this._vaultDirty = false
-    } catch (_) { /* sigue offline */ }
+  /** ¿Lo guardado está en tu bóveda ahora mismo, sin nada pendiente? */
+  get vaultBacked () {
+    const s = this.vault
+    return s.state === 'synced' && s.pending === 0
   }
 
-  /** Escritura: SIEMPRE a la caché local, y al vault si está emparejado/online. */
+  /**
+   * Ponerse al día con la bóveda ahora (el «Sincronizar» de una app). Lanza con el código
+   * del error si no se pudo; sin bóveda emparejada lanza `vault-off`.
+   */
+  async vaultSync () {
+    if (!this._vaultSync) throw codeError('vault-off', 'the store was opened without an identity')
+    const status = await this._vaultSync.run()
+    if (status.state === 'off') throw codeError('vault-off', `the vault backup is off (${status.reason})`)
+    if (status.state === 'error') throw codeError(status.error.code || 'vault-sync-failed', status.error.message)
+    return status
+  }
+
+  /** Escritura: en el navegador, y se anota para subirla a la bóveda por detrás. */
   async _write (method, params) {
-    if (this._vaultMode) await this._flushDirty()
-    const local = await this._call(method, params)
-    if (this._vaultMode) {
-      try { await this._identity.vaultStore(method, params) } catch (_) { this._vaultDirty = true } // offline: queda en caché, sube al reconectar
-    }
-    return local
-  }
-
-  /** Lectura: del vault (ve a tus otros dispositivos); si está offline, de la caché. */
-  async _read (method, params) {
-    if (this._vaultMode) {
-      await this._flushDirty()
-      try { return await this._identity.vaultStore(method, params) } catch (_) { /* offline → caché */ }
-    }
-    return this._call(method, params)
+    const result = await this._call(method, params)
+    this._vaultSync?.noteWrite(method, params, result)
+    return result
   }
 
   ping () { return this._call('ping') }
 
-  setMaxPerThread (max) { return this._call('setMaxPerThread', { max }) }
+  async _applyMaxPerThread () {
+    if (this._maxPerThread == null) return
+    const r = await this._call('setMaxPerThread', { max: this._maxPerThread })
+    this._appliedMax = r.maxPerThread
+  }
+
+  async setMaxPerThread (max) {
+    const r = await this._call('setMaxPerThread', { max })
+    if (r.maxPerThread !== this._appliedMax) {
+      this._appliedMax = r.maxPerThread
+      // Con otro tope, lo que se dio por conciliado por culpa del recorte ya no lo está.
+      if (this._vaultSync) { this._vaultSync.resetMarks(); this._vaultSync.run() }
+    }
+    return r
+  }
 
   appendMessage (threadKey, entry) { return this._write('appendMessage', { threadKey, entry }) }
 
-  listThread (threadKey, opts = {}) { return this._read('listThread', { threadKey, ...opts }) }
+  listThread (threadKey, opts = {}) { return this._call('listThread', { threadKey, ...opts }) }
 
-  listThreadKeys () { return this._read('listThreadKeys') }
+  listThreadKeys () { return this._call('listThreadKeys') }
 
-  getThreadSummaries () { return this._read('getThreadSummaries') }
+  getThreadSummaries () { return this._call('getThreadSummaries') }
 
   removeThread (threadKey) { return this._write('removeThread', { threadKey }) }
 
   removeMessage (threadKey, id) { return this._write('removeMessage', { threadKey, id }) }
 
-  async clearAll () {
-    const r = await this._call('clearAll')
-    if (this._vaultMode) { try { await this._identity.vaultStore('importThreads', { threads: {}, mode: 'replace' }) } catch (_) {} }
-    return r
-  }
+  /** Borra todos los hilos del perfil; en la bóveda también (con lápidas, por detrás). */
+  clearAll () { return this._write('clearAll') }
 
   getStats () { return this._call('getStats') } // local: es el uso de almacenamiento del navegador
 
@@ -307,12 +322,12 @@ export class Store {
   /** Registra una apertura de `appId` (típicamente el hostname de la app). */
   recordOpen (appId) { return this._write('recordOpen', { appId }) }
   /** Devuelve { [appId]: { count, ts } } con todas las aperturas registradas. */
-  getOpens () { return this._read('getOpens') }
+  getOpens () { return this._call('getOpens') }
   /** Borra el contador de aperturas. */
   clearOpens () { return this._write('clearOpens') }
 
   // ----- export / import -----
-  exportThreads () { return this._read('exportThreads') }
+  exportThreads () { return this._call('exportThreads') }
   importThreads (threads, mode = 'merge') { return this._write('importThreads', { threads, mode }) }
 
   // ----- Drive sync -----
