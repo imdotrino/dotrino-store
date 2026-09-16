@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/store",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Almacén compartido de hilos de mensajes para el ecosistema Dotrino (vault iframe + postMessage)",
   "type": "module",
   "main": "src/index.js",
@@ -24,8 +24,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
-    "typescript": "5.9.3",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typescript": "5.9.3"
   },
   "keywords": [
     "dotrino",

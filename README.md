@@ -51,6 +51,15 @@ const stats = await store.getStats()
 //     backend: 'indexeddb', usage, quota, persisted }
 ```
 
+## Abrir el almacén: el saludo (desde 0.9.0)
+
+`Store.connect()` carga el iframe y espera su `ready`. Ese mensaje se manda **una sola vez**, al cargar la página: si se pierde, o si la página tarda más que el tope, quien esperaba se queda sin almacén y la app enseña «No se pudo abrir tu almacén». Qué cambió:
+
+- **El cliente pregunta, además de escuchar.** Mientras espera manda `{ _ccs: true, type: 'hello' }` al iframe cada `helloEveryMs` (500 ms por defecto) y la página contesta `ready`. Un `ready` perdido deja de ser definitivo.
+- **Abrir tiene su propio tope**: `connectTimeoutMs` (20 s), aparte del de cada petición (`timeoutMs`, 8 s). Abrir es cargar una página por la red; una petición no.
+- **Un fallo ya no dura toda la sesión.** Hasta 0.8.0 la promesa rechazada se quedaba cacheada en el singleton, así que cualquier reintento —el botón «Reintentar» que enseñan las apps— devolvía el mismo error sin intentar nada. Ahora el fallo desmonta el iframe y el siguiente `connect()` levanta uno nuevo.
+- **El error dice qué pasó**: `Store did not respond within 20000ms (https://store.dotrino.com/ never loaded)`.
+
 ## Garantías
 
 - **Per-thread cap**: 1000 mensajes por defecto, configurable con `setMaxPerThread(n)`. El más antiguo se descarta al añadir uno nuevo si pasa el cap.

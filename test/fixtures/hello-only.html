@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>store que solo contesta si le preguntan</title>
+<script type="module">
+  // Simula que el `ready` de carga se perdió: esta página NO lo manda, solo contesta
+  // cuando le preguntan. Si el cliente pregunta, la conexión se abre igual.
+  window.addEventListener('message', (e) => {
+    const m = e.data
+    if (m && m._ccs === true && m.type === 'hello') {
+      parent.postMessage({ _ccs: true, type: 'ready', version: 'hello-only' }, '*')
+    }
+  })
+</script>

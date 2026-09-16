@@ -13,6 +13,10 @@ export class Store {
   constructor (options = {}) {
     this.storeUrl = options.storeUrl || 'https://store.dotrino.com/'
     this.timeoutMs = options.timeoutMs ?? 8000
+    // Abrir el almacén es cargar una página por la red: se le da más margen que a una
+    // petición, y mientras tanto se le pregunta (ver `_handshake`).
+    this.connectTimeoutMs = options.connectTimeoutMs ?? 20000
+    this.helloEveryMs = options.helloEveryMs ?? 500
     this._iframe = null
     this._ready = null
     this._handler = null
@@ -45,7 +49,25 @@ export class Store {
 
   ready () {
     if (this._ready) return this._ready
-    this._ready = new Promise((resolve, reject) => {
+    this._ready = this._handshake().catch((e) => {
+      // Un fallo NO deja el almacén fallado para siempre: se desmonta todo para que el
+      // siguiente intento —el «Reintentar» que enseña la app— levante un iframe nuevo.
+      // Hasta 0.8.0 la promesa rechazada se quedaba cacheada en el singleton y ese botón
+      // devolvía el mismo error sin intentar nada: un tropiezo de red duraba la sesión entera.
+      this.destroy()
+      throw e
+    })
+    return this._ready
+  }
+
+  /**
+   * El saludo con el iframe. Además de escuchar su `ready`, se le PREGUNTA cada
+   * `helloEveryMs`: si ese mensaje se perdió —o si la página tardó en cargar—, la
+   * siguiente pregunta lo repone, sin recargar nada. Si ni así contesta, se lanza
+   * diciendo si el iframe llegó a cargar.
+   */
+  _handshake () {
+    return new Promise((resolve, reject) => {
       const iframe = document.createElement('iframe')
       iframe.src = this.storeUrl
       iframe.style.display = 'none'
@@ -53,16 +75,24 @@ export class Store {
       iframe.setAttribute('title', 'Dotrino message store')
       iframe.referrerPolicy = 'origin'
       this._iframe = iframe
+      this._loaded = false
+      iframe.addEventListener('load', () => { this._loaded = true })
 
+      const stopAsking = () => { clearTimeout(timeout); clearInterval(this._hello); this._hello = null }
       const timeout = setTimeout(() => {
-        reject(new Error(`Store did not respond within ${this.timeoutMs}ms`))
-      }, this.timeoutMs)
+        stopAsking()
+        reject(new Error(`Store did not respond within ${this.connectTimeoutMs}ms (${this.storeUrl} ${this._loaded ? 'loaded' : 'never loaded'})`))
+      }, this.connectTimeoutMs)
 
       this._handler = (event) => {
         if (event.source !== iframe.contentWindow) return
         const msg = event.data
         if (!msg || msg._ccs !== true) return
-        if (msg.type === 'ready') { clearTimeout(timeout); this._initProfile().then(() => this._enableVault()).finally(() => resolve(this)); return }
+        if (msg.type === 'ready') {
+          stopAsking()
+          this._initProfile().then(() => this._enableVault()).finally(() => resolve(this))
+          return
+        }
         if (msg.type === 'response') {
           const pending = this._pending.get(msg.id)
           if (!pending) return
@@ -76,13 +106,17 @@ export class Store {
       }
       window.addEventListener('message', this._handler)
       document.body.appendChild(iframe)
+      this._hello = setInterval(() => {
+        try { iframe.contentWindow?.postMessage({ _ccs: true, type: 'hello' }, '*') } catch (_) { /* aún sin cargar */ }
+      }, this.helloEveryMs)
     })
-    return this._ready
   }
 
   destroy () {
     if (this._handler) window.removeEventListener('message', this._handler)
     if (this._iframe?.parentNode) this._iframe.parentNode.removeChild(this._iframe)
+    clearInterval(this._hello)
+    this._hello = null
     this._iframe = null
     this._handler = null
     this._ready = null

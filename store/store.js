@@ -11,6 +11,10 @@
 // contacto). Las entradas son objetos opacos para este store; solo se le
 // pide tener `id` y `ts` para deduplicación y sort.
 
+// Lo que esta página anuncia al saludar. No es la versión del paquete npm: es la del
+// diálogo por `postMessage`, que solo sube cuando ese diálogo cambia.
+const STORE_VERSION = '0.2.0'
+
 // Polyfill de crypto.randomUUID: en contextos no seguros (p.ej. cuando este
 // iframe se carga desde una página padre HTTP o desde un contexto sin secure
 // context) `crypto.randomUUID` puede no existir aunque `crypto.subtle` sí.
@@ -484,7 +488,15 @@ sync.onStatus((payload) => {
 
 window.addEventListener('message', async (event) => {
   const msg = event.data
-  if (!msg || msg._ccs !== true || msg.type !== 'request') return
+  if (!msg || msg._ccs !== true) return
+  // «¿Estás?» de quien nos carga: el `ready` de más abajo se manda una sola vez, al
+  // cargar, y quien no lo reciba se queda esperando para siempre. Esto lo repone sin
+  // recargar el iframe (el cliente pregunta mientras espera).
+  if (msg.type === 'hello') {
+    event.source?.postMessage({ _ccs: true, type: 'ready', version: STORE_VERSION }, event.origin)
+    return
+  }
+  if (msg.type !== 'request') return
   const { id, method, params } = msg
   const reply = (payload) => event.source?.postMessage(
     { _ccs: true, type: 'response', id, ...payload },
@@ -501,5 +513,5 @@ window.addEventListener('message', async (event) => {
 
 // Notify parent we are ready
 if (window.parent && window.parent !== window) {
-  window.parent.postMessage({ _ccs: true, type: 'ready', version: '0.1.0' }, '*')
+  window.parent.postMessage({ _ccs: true, type: 'ready', version: STORE_VERSION }, '*')
 }

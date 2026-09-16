@@ -6,7 +6,12 @@ export interface ThreadEntry {
 
 export interface StoreOptions {
   storeUrl?: string
+  /** Tope de cada petición al iframe (por defecto 8000). */
   timeoutMs?: number
+  /** Tope para abrir el almacén, que es cargar una página por la red (por defecto 20000). */
+  connectTimeoutMs?: number
+  /** Cada cuánto se le pregunta al iframe mientras se espera su `ready` (por defecto 500). */
+  helloEveryMs?: number
 }
 
 export interface ThreadSummary {
