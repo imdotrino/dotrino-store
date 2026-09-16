@@ -9,6 +9,12 @@
 
 let singleton = null
 
+function codeError (code, message) {
+  const e = new Error(message)
+  e.code = code
+  return e
+}
+
 export class Store {
   constructor (options = {}) {
     this.storeUrl = options.storeUrl || 'https://store.dotrino.com/'
@@ -39,10 +45,46 @@ export class Store {
     // Salió al pasar @dotrino/support de jsDelivr a npm: desde entonces la app y
     // la moneda comparten este módulo (antes eran dos instancias) y corren la
     // carrera de verdad.
-    if (singleton) { await singleton.ready(); return singleton }
+    //
+    // Y la identidad NO se ignora cuando el singleton ya existe. La moneda de
+    // `<dotrino-support>` conecta SIN identidad al montarse (para contar la apertura) y
+    // suele llegar antes que la app; hasta 0.9.0 la app que pedía `connect({ identity })`
+    // recibía ese mismo almacén sin perfil y todo lo suyo caía, sin ningún error, en el
+    // espacio común de todos los perfiles del aparato. Ahora el almacén la adopta.
+    if (singleton) {
+      await singleton.ready()
+      if (options.identity) await singleton._adoptIdentity(options.identity)
+      return singleton
+    }
     singleton = new Store(options)
     await singleton.ready()
     return singleton
+  }
+
+  /** El perfil al que está atado el almacén, o null si se conectó sin identidad. */
+  get profileId () { return this._profileId || null }
+
+  /**
+   * Ata a un perfil un almacén que ya estaba abierto sin identidad. Si ya tenía una, la
+   * nueva tiene que ser del MISMO perfil: dos perfiles no comparten un almacén abierto.
+   */
+  async _adoptIdentity (identity) {
+    if (this._identity === identity) return this._adopting
+    if (this._identity) {
+      const p = await identity.currentProfile()
+      if (p?.id !== this._profileId) {
+        throw codeError('store-identity-mismatch', `the store is already bound to profile ${this._profileId}, not to ${p?.id}`)
+      }
+      return
+    }
+    this._identity = identity
+    this._adopting = this._initProfile().then(() => this._enableVault()).catch((e) => {
+      this._identity = null
+      this._adopting = null
+      this._profileId = null
+      throw e
+    })
+    return this._adopting
   }
 
   static current () { return singleton }
@@ -90,7 +132,9 @@ export class Store {
         if (!msg || msg._ccs !== true) return
         if (msg.type === 'ready') {
           stopAsking()
-          this._initProfile().then(() => this._enableVault()).finally(() => resolve(this))
+          // Si no se puede atar al perfil, abrir falla: un almacén que responde pero guarda
+          // en el espacio de otro es peor que uno que no abre.
+          this._initProfile().then(() => this._enableVault()).then(() => resolve(this), reject)
           return
         }
         if (msg.type === 'response') {
@@ -120,6 +164,7 @@ export class Store {
     this._iframe = null
     this._handler = null
     this._ready = null
+    this._adopting = null
     if (singleton === this) singleton = null
   }
 
@@ -149,10 +194,16 @@ export class Store {
    */
   async _initProfile () {
     if (!this._identity) return
-    try {
-      const p = this._identity.currentProfile ? await this._identity.currentProfile() : null
-      if (p?.id) { this._profileId = p.id; await this._call('setProfile', { profileId: p.id }) }
-    } catch (_) { /* sin perfil → namespace por defecto */ }
+    // Sin perfil NO se sigue: antes caía al espacio por defecto y mezclaba los datos de
+    // todos los perfiles del aparato sin decir nada.
+    if (typeof this._identity.currentProfile !== 'function') {
+      throw codeError('store-no-profile', 'the identity passed to the store has no currentProfile()')
+    }
+    const p = await this._identity.currentProfile()
+    if (!p?.id) throw codeError('store-no-profile', 'the identity has no active profile')
+    const r = await this._call('setProfile', { profileId: p.id })
+    if (r?.profileId !== p.id) throw codeError('store-no-profile', `the store did not switch to profile ${p.id}`)
+    this._profileId = p.id
     try {
       if (this._identity.onVault && !this._vaultSub) {
         this._vaultSub = this._identity.onVault((e) => {

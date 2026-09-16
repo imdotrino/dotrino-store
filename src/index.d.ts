@@ -12,6 +12,16 @@ export interface StoreOptions {
   connectTimeoutMs?: number
   /** Cada cuánto se le pregunta al iframe mientras se espera su `ready` (por defecto 500). */
   helloEveryMs?: number
+  /**
+   * Identidad de @dotrino/identity: ata el almacén al PERFIL activo (y lo respalda en su
+   * bóveda si está emparejada). Si el almacén ya estaba abierto sin identidad, lo adopta;
+   * si estaba atado a otro perfil, `connect` lanza con `code: 'store-identity-mismatch'`.
+   * Si la identidad no tiene perfil activo, lanza con `code: 'store-no-profile'`.
+   */
+  identity?: {
+    currentProfile (): Promise<{ id: string } | null>
+    [k: string]: any
+  }
 }
 
 export interface ThreadSummary {
@@ -48,6 +58,8 @@ export class Store {
   constructor (options?: StoreOptions)
   static connect (options?: StoreOptions): Promise<Store>
   static current (): Store | null
+  /** Perfil al que está atado el almacén; null si se conectó sin identidad. */
+  readonly profileId: string | null
   ready (): Promise<Store>
   destroy (): void
   ping (): Promise<{ pong: true; version: string }>

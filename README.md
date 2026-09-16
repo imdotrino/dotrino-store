@@ -60,6 +60,19 @@ const stats = await store.getStats()
 - **Un fallo ya no dura toda la sesión.** Hasta 0.8.0 la promesa rechazada se quedaba cacheada en el singleton, así que cualquier reintento —el botón «Reintentar» que enseñan las apps— devolvía el mismo error sin intentar nada. Ahora el fallo desmonta el iframe y el siguiente `connect()` levanta uno nuevo.
 - **El error dice qué pasó**: `Store did not respond within 20000ms (https://store.dotrino.com/ never loaded)`.
 
+## Un almacén por perfil: `connect({ identity })` (desde 0.10.0)
+
+Con `identity` (de `@dotrino/identity`), el almacén se ata al **perfil activo**: cada perfil del aparato tiene sus propios hilos, y si el perfil está emparejado con una bóveda, el almacén se respalda en ella.
+
+```js
+const store = await Store.connect({ identity })
+store.profileId   // 'p2419686e' — o null si se conectó sin identidad
+```
+
+- **Llegar tarde ya no deja sin perfil.** El almacén es un singleton por página, y la moneda de `<dotrino-support>` lo abre **sin** identidad al montarse para contar la apertura; suele llegar antes que la app. Hasta 0.9.0, la app que después pedía `connect({ identity })` recibía ese almacén sin perfil y todo lo suyo iba, **sin ningún error**, al espacio común de todos los perfiles del aparato. Ahora el almacén abierto **adopta** la identidad antes de devolverse.
+- **Otro perfil se rechaza.** Si el almacén ya está atado a un perfil y llega una identidad de otro, `connect` lanza con `code: 'store-identity-mismatch'`.
+- **Sin perfil no se abre.** Si la identidad no tiene perfil activo, `connect` lanza con `code: 'store-no-profile'`. Antes se caía al espacio por defecto en silencio.
+
 ## Garantías
 
 - **Per-thread cap**: 1000 mensajes por defecto, configurable con `setMaxPerThread(n)`. El más antiguo se descarta al añadir uno nuevo si pasa el cap.
