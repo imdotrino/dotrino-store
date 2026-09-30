@@ -26,6 +26,8 @@ const REF_BYTES = 150_000
 /** Una entrada sola más grande que esto no cabe por el proxio, ni sola. */
 const MAX_ENTRY_BYTES = 550_000
 const FLUSH_DELAY_MS = 1500
+/** Hilos de la identidad en el almacén de la bóveda: no son de ninguna app (ver `_reconcile`). */
+const IDENTITY_PREFIX = 'identity.'
 const RESYNC_EVERY_MS = 5 * 60_000
 const VISIBLE_GAP_MS = 60_000
 const RETRY_MS = [15_000, 60_000, 5 * 60_000]
@@ -330,6 +332,9 @@ export class VaultSync {
     const [remote, local] = await Promise.all([this._vault('getThreadDigests', {}), this._call('getThreadDigests', {})])
     const keys = []
     for (const k of new Set([...Object.keys(local), ...Object.keys(remote)])) {
+      // Los hilos `identity.*` son de la IDENTIDAD (su libro de contactos, `identity.peers`),
+      // no de las apps: los concilia ella, y aquí ni se bajan ni se suben.
+      if (k.startsWith(IDENTITY_PREFIX)) continue
       const pair = `${local[k]?.digest || ''}|${remote[k]?.digest || ''}`
       if (local[k]?.digest === remote[k]?.digest) { this._marks.delete(k); continue }
       if (this._marks.get(k) === pair) continue
