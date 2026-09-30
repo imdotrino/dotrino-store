@@ -234,3 +234,18 @@ test('adoptCommon sin perfil falla diciéndolo', async ({ page }) => {
   await load(page)
   await expect(call(page, 'adoptCommon', { prefixes: ['wallet.'] })).rejects.toThrow(/needs a profile/)
 })
+
+test('sin conexión el almacén sigue cargando y respondiendo (service worker)', async ({ page, context }) => {
+  await load(page)
+  await call(page, 'appendMessage', { threadKey: 'offline', entry: { id: 'o1', ts: 1 } })
+  await page.evaluate(() => navigator.serviceWorker.ready)
+  await page.reload({ waitUntil: 'domcontentloaded' })   // ya controlada por el service worker
+  await context.setOffline(true)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await injectCall(page)
+  const list = await call<Entry[]>(page, 'listThread', { threadKey: 'offline' })
+  expect(list.map((e) => e.id)).toEqual(['o1'])
+  await call(page, 'appendMessage', { threadKey: 'offline', entry: { id: 'o2', ts: 2 } })
+  expect((await call<Entry[]>(page, 'listThread', { threadKey: 'offline' })).length).toBe(2)
+  await context.setOffline(false)
+})

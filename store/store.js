@@ -205,6 +205,11 @@ async function writeTombs () {
 }
 initPromise = init()
 
+// Sin conexión el iframe tiene que cargar igual: lo sirve su service worker (sw.js).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('[cc-store] service worker not registered:', e?.message || e))
+}
+
 // Persiste el contador de aperturas. Es un mapa pequeño (acotado por el número
 // de apps), así que no necesita la red de evicción de los hilos.
 async function writeOpens () {
