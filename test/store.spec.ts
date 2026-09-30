@@ -146,3 +146,91 @@ test('getStats reporta backend indexeddb y cuota', async ({ page }) => {
   // En Chromium la cuota de IndexedDB es enorme (no el techo de ~5MB de localStorage).
   expect(stats.quota === null || stats.quota > 50 * 1024 * 1024).toBeTruthy()
 })
+
+// ----- EXPULSIÓN: apartar, no borrar (dueño, 2026-09-30) -----
+// El 2026-09-28 `wipeProfile` borró facturas que la bóveda nunca recibió. Ahora aparta.
+
+test('wipeProfile aparta el perfil (ninguna app lo ve) y se puede recuperar', async ({ page }) => {
+  await load(page)
+  await call(page, 'setProfile', { profileId: 'pA' })
+  await call(page, 'appendMessage', { threadKey: 'facturero.invoices.2026-09-28', entry: { id: 'f1', ts: 1, total: 10 } })
+  await call(page, 'appendMessage', { threadKey: 'facturero.invoices.2026-09-28', entry: { id: 'f2', ts: 2, total: 20 } })
+  const r = await call<{ quarantined: boolean }>(page, 'wipeProfile')
+  expect(r.quarantined).toBe(true)
+  expect(await call(page, 'listThreadKeys')).toEqual([])
+
+  // Sobrevive a recargar: está en el disco, no en memoria.
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await injectCall(page)
+  const q = await call<Array<{ key: string; pid: string; entries: number }>>(page, 'listQuarantine')
+  expect(q.length).toBe(1)
+  expect(q[0].pid).toBe('pA')
+  expect(q[0].entries).toBe(2)
+
+  // Se recupera en el perfil que lo pida (aquí, uno nuevo) y lo apartado se queda.
+  await call(page, 'setProfile', { profileId: 'pB' })
+  const back = await call<{ restored: string[] }>(page, 'restoreQuarantine', { key: q[0].key })
+  expect(back.restored).toEqual(['facturero.invoices.2026-09-28'])
+  const list = await call<Entry[]>(page, 'listThread', { threadKey: 'facturero.invoices.2026-09-28' })
+  expect(list.map((e) => e.id)).toEqual(['f1', 'f2'])
+  expect((await call<unknown[]>(page, 'listQuarantine')).length).toBe(1)
+})
+
+test('lo apartado se guarda un año y después se poda', async ({ page }) => {
+  await load(page)
+  await call(page, 'setProfile', { profileId: 'pA' })
+  await call(page, 'appendMessage', { threadKey: 't', entry: { id: 'a', ts: 1 } })
+  await call(page, 'wipeProfile')
+  const envejecer = (dias: number) => page.evaluate((d) => new Promise<void>((resolve, reject) => {
+    const req = indexedDB.open('cc-store', 1)
+    req.onsuccess = () => {
+      const tx = req.result.transaction('kv', 'readwrite')
+      const st = tx.objectStore('kv')
+      const g = st.get('quarantine.index.v1')
+      g.onsuccess = () => { st.put(g.result.map((q: { at: number }) => ({ ...q, at: Date.now() - d * 86400000 })), 'quarantine.index.v1') }
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+    }
+  }), dias)
+  await envejecer(364)
+  await page.reload({ waitUntil: 'domcontentloaded' }); await injectCall(page)
+  expect((await call<unknown[]>(page, 'listQuarantine')).length).toBe(1)
+  await envejecer(367)
+  await page.reload({ waitUntil: 'domcontentloaded' }); await injectCall(page)
+  expect((await call<unknown[]>(page, 'listQuarantine')).length).toBe(0)
+})
+
+test('un perfil vacío no deja nada apartado', async ({ page }) => {
+  await load(page)
+  await call(page, 'setProfile', { profileId: 'pA' })
+  expect((await call<{ quarantined: boolean }>(page, 'wipeProfile')).quarantined).toBe(false)
+  expect(await call(page, 'listQuarantine')).toEqual([])
+})
+
+// ----- ADOPTAR del espacio común (apps que conectaban sin identidad) -----
+
+test('adoptCommon trae al perfil los hilos de la app, una vez, sin borrar el original', async ({ page }) => {
+  await load(page)
+  // Lo que la app guardó sin identidad: espacio común.
+  await call(page, 'appendMessage', { threadKey: 'wallet.cards', entry: { id: 'c1', ts: 1 } })
+  await call(page, 'appendMessage', { threadKey: 'chess.games', entry: { id: 'g1', ts: 1 } })
+
+  await call(page, 'setProfile', { profileId: 'pA' })
+  const r = await call<{ adopted: string[] }>(page, 'adoptCommon', { prefixes: ['wallet.'] })
+  expect(r.adopted).toEqual(['wallet.cards'])
+  expect(await call(page, 'listThreadKeys')).toEqual(['wallet.cards'])
+  expect((await call<{ adopted: string[] }>(page, 'adoptCommon', { prefixes: ['wallet.'] })).adopted).toEqual([])
+
+  // Otro perfil del aparato no vuelve a copiarlo.
+  await call(page, 'setProfile', { profileId: 'pB' })
+  expect((await call<{ adopted: string[] }>(page, 'adoptCommon', { prefixes: ['wallet.'] })).adopted).toEqual([])
+
+  // El original sigue en el espacio común.
+  await call(page, 'setProfile', { profileId: null })
+  expect((await call<string[]>(page, 'listThreadKeys')).sort()).toEqual(['chess.games', 'wallet.cards'])
+})
+
+test('adoptCommon sin perfil falla diciéndolo', async ({ page }) => {
+  await load(page)
+  await expect(call(page, 'adoptCommon', { prefixes: ['wallet.'] })).rejects.toThrow(/needs a profile/)
+})

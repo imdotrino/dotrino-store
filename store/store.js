@@ -13,7 +13,7 @@
 
 // Lo que esta página anuncia al saludar. No es la versión del paquete npm: es la del
 // diálogo por `postMessage`, que solo sube cuando ese diálogo cambia.
-const STORE_VERSION = '0.3.0'
+const STORE_VERSION = '0.4.0'
 
 // Polyfill de crypto.randomUUID: en contextos no seguros (p.ej. cuando este
 // iframe se carga desde una página padre HTTP o desde un contexto sin secure
@@ -61,6 +61,15 @@ const OPENS_LS_KEY = 'cc.store.opens.v1'
 // Lápidas de lo borrado (ver `core.js`): sin ellas, un borrado vuelve desde la bóveda o
 // desde otro aparato en la siguiente sincronización.
 const TOMBS_IDB_KEY = 'tombs.v1'
+// LO QUE UN PERFIL ADOPTÓ DEL ESPACIO COMÚN (`adoptCommon`): `{ [prefijo]: { pid, at, keys } }`.
+// Global al aparato, no por perfil: lo del espacio común era de UN perfil (no había otro
+// cuando se escribió), y copiarlo a cada cuenta que se abra sería peor que no moverlo.
+const ADOPTED_KEY = 'adopted.v1'
+// APARTADO, no borrado (dueño, 2026-09-30). Lo que antes borraba `wipeProfile` se guarda
+// aquí un año: ninguna app lo ve ni se sincroniza, pero se puede recuperar. Índice aparte
+// porque IndexedDB se usa como clave→valor y no se recorren sus claves.
+const QUARANTINE_INDEX = 'quarantine.index.v1'
+const QUARANTINE_KEEP_MS = 366 * 24 * 60 * 60 * 1000
 const MAX_PER_THREAD_DEFAULT = 1000
 let maxPerThread = MAX_PER_THREAD_DEFAULT
 let sync = null
@@ -112,6 +121,14 @@ function idbGet (db, key) {
     const r = tx.objectStore(IDB_STORE).get(key)
     r.onsuccess = () => resolve(r.result)
     r.onerror = () => reject(r.error)
+  })
+}
+function idbDel (db, key) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).delete(key)
+    tx.oncomplete = () => resolve(true)
+    tx.onerror = () => reject(tx.error)
   })
 }
 function idbSet (db, key, val) {
@@ -171,6 +188,7 @@ async function init () {
   } catch (_) { opens = {} }
   if (opensKey() !== OPENS_LS_KEY) opens = await adoptarLegado(OPENS_LS_KEY, opens)
   await loadTombs()
+  try { await pruneQuarantine() } catch (e) { console.warn('[cc-store] could not prune quarantine:', e) }
 }
 
 async function loadTombs () {
@@ -197,6 +215,29 @@ async function writeOpens () {
 }
 
 function loadAll () { return state }
+
+/** Lee/escribe una clave cualquiera del backend (IndexedDB, o localStorage si no hay). */
+async function rawGet (key) {
+  if (!usingFallback && idb) return idbGet(idb, key)
+  const raw = localStorage.getItem(key)
+  return raw ? JSON.parse(raw) : undefined
+}
+async function rawSet (key, value) {
+  if (!usingFallback && idb) return idbSet(idb, key, value)
+  localStorage.setItem(key, JSON.stringify(value))
+}
+
+/** Quita del índice (y del disco) lo apartado hace más de un año. */
+async function pruneQuarantine (now = Date.now()) {
+  const index = (await rawGet(QUARANTINE_INDEX)) || []
+  const keep = index.filter((q) => now - (q.at || 0) < QUARANTINE_KEEP_MS)
+  if (keep.length === index.length) return
+  for (const q of index) {
+    if (keep.includes(q)) continue
+    try { if (!usingFallback && idb) await idbDel(idb, q.key); else localStorage.removeItem(q.key) } catch (_) {}
+  }
+  await rawSet(QUARANTINE_INDEX, keep)
+}
 
 function dropOldest (data, fraction = 0.2) {
   // Aplana todas las entradas, ordena por ts asc, descarta los primeros N%.
@@ -447,16 +488,81 @@ const handlers = {
     return { ok: true, profileId: _pid }
   },
 
-  // Borra SOLO el store del perfil activo. Se llama cuando el vault REVOCA el acceso de
-  // ese perfil (los datos vivían en el vault; la cache local de ESE perfil se limpia). Los
-  // demás perfiles quedan intactos.
+  /**
+   * APARTA el store del perfil activo: lo saca de la vista de las apps y de la
+   * sincronización, pero NO lo borra — se guarda un año (`QUARANTINE_KEEP_MS`) y se puede
+   * recuperar con `restoreQuarantine`. Se llama cuando la bóveda expulsa al aparato.
+   *
+   * Hasta 0.11 esto BORRABA, y el 2026-09-28 se llevó facturas que la bóveda nunca había
+   * recibido: el navegador llevaba 12 días sin poder respaldar y la poda de aparatos
+   * vencidos lo expulsó. Decisión del dueño: apartar, no borrar (2026-09-30). El precio,
+   * que se dice: un aparato robado y expulsado conserva esos datos en su disco un año.
+   *
+   * Si apartar falla, NO se vacía nada: un error aquí no puede costar los datos.
+   */
   async wipeProfile () {
+    const at = Date.now()
+    const hay = Object.keys(state).length || Object.keys(tombs).length
+    if (hay) {
+      const key = `quarantine.${_pid || 'common'}.${at}`
+      await rawSet(key, { pid: _pid, at, threads: state, opens, tombs })
+      const index = (await rawGet(QUARANTINE_INDEX)) || []
+      index.push({ key, pid: _pid, at, threads: Object.keys(state).length, entries: Object.values(state).reduce((n, a) => n + a.length, 0) })
+      await rawSet(QUARANTINE_INDEX, index)
+    }
     state = {}; opens = {}; tombs = {}
-    try {
-      if (idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}); await idbSet(idb, tombsKey(), {}) }
-      else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()); localStorage.removeItem(tombsKey()) }
-    } catch (_) { /* best-effort */ }
-    return { ok: true, profileId: _pid }
+    if (!usingFallback && idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}); await idbSet(idb, tombsKey(), {}) }
+    else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()); localStorage.removeItem(tombsKey()) }
+    return { ok: true, profileId: _pid, quarantined: !!hay }
+  },
+
+  /** Lo apartado en este aparato (de todos los perfiles), lo más nuevo primero. */
+  async listQuarantine () {
+    return ((await rawGet(QUARANTINE_INDEX)) || []).slice().sort((a, b) => b.at - a.at)
+  },
+
+  /**
+   * Vuelve a poner en el perfil ACTIVO lo que se apartó (mezcla por id y `ts`, como una
+   * sincronización). Lo apartado se queda donde estaba: recuperar no gasta el respaldo.
+   */
+  async restoreQuarantine ({ key }) {
+    const index = (await rawGet(QUARANTINE_INDEX)) || []
+    if (!index.some((q) => q.key === key)) throw Object.assign(new Error(`nothing quarantined under ${key}`), { code: 'quarantine-not-found' })
+    const q = await rawGet(key)
+    if (!q?.threads) throw Object.assign(new Error(`the quarantined data under ${key} is missing`), { code: 'quarantine-missing' })
+    const data = loadAll()
+    const changed = core.mergeEntries(data, tombs, q.threads, { mode: 'merge', max: maxPerThread })
+    if (changed.size) await persist(data)
+    return { restored: [...changed] }
+  },
+
+  /**
+   * ADOPTA en el perfil activo los hilos de la app que estaban en el ESPACIO COMÚN (lo que
+   * guardó antes de conectarse con identidad). `prefixes`: los prefijos de sus hilos
+   * (`['wallet.']`). Una vez por prefijo y aparato: lo adopta el primer perfil que lo pide,
+   * y ningún otro lo vuelve a copiar. El original NO se borra.
+   */
+  async adoptCommon ({ prefixes }) {
+    if (!_pid) throw Object.assign(new Error('adoptCommon needs a profile: call setProfile first'), { code: 'store-no-profile' })
+    if (!Array.isArray(prefixes) || !prefixes.length || !prefixes.every((x) => typeof x === 'string' && x.length >= 2)) {
+      throw new Error('adoptCommon: prefixes must be a non-empty list of thread key prefixes')
+    }
+    const common = (await rawGet(IDB_KEY)) || {}
+    const marks = (await rawGet(ADOPTED_KEY)) || {}
+    const data = loadAll()
+    const adopted = []
+    for (const prefix of prefixes) {
+      if (marks[prefix]) continue
+      const keys = Object.keys(common).filter((k) => k.startsWith(prefix))
+      if (!keys.length) continue
+      const incoming = {}
+      for (const k of keys) incoming[k] = common[k]
+      core.mergeEntries(data, tombs, incoming, { mode: 'merge', max: maxPerThread })
+      marks[prefix] = { pid: _pid, at: Date.now(), keys: keys.length }
+      adopted.push(...keys)
+    }
+    if (adopted.length) { await persist(data); await rawSet(ADOPTED_KEY, marks) }
+    return { adopted }
   },
 
   /** Tamaño total + por hilo. Útil para mostrar "uso de almacenamiento". */

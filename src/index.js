@@ -36,6 +36,8 @@ export class Store {
     // bóveda por detrás (ver `vault-sync.js`). Se lee y se escribe siempre en el navegador.
     this._identity = options.identity || null
     this._maxPerThread = options.maxPerThread ?? null
+    // Prefijos de los hilos de la app que se adoptan del espacio común al atarse a un perfil.
+    this._adoptCommon = Array.isArray(options.adoptCommon) ? [...options.adoptCommon] : []
     this._vaultSync = null
   }
 
@@ -57,6 +59,12 @@ export class Store {
     if (singleton) {
       await singleton.ready()
       if (options.maxPerThread != null) await singleton.setMaxPerThread(options.maxPerThread)
+      if (Array.isArray(options.adoptCommon)) {
+        const nuevos = options.adoptCommon.filter((x) => !singleton._adoptCommon.includes(x))
+        singleton._adoptCommon.push(...nuevos)
+        // Si el perfil ya estaba atado, lo nuevo se adopta ahora (sin esperar a otro arranque).
+        if (nuevos.length && singleton._profileId) await singleton._adoptFromCommon(nuevos)
+      }
       if (options.identity) await singleton._adoptIdentity(options.identity)
       return singleton
     }
@@ -214,6 +222,7 @@ export class Store {
     const r = await this._call('setProfile', { profileId: p.id })
     if (r?.profileId !== p.id) throw codeError('store-no-profile', `the store did not switch to profile ${p.id}`)
     this._profileId = p.id
+    if (this._adoptCommon.length) await this._adoptFromCommon(this._adoptCommon)
     if (typeof this._identity.onVault === 'function' && !this._vaultSub) {
       this._vaultSub = this._identity.onVault((e) => {
         if (!e) return
@@ -232,8 +241,31 @@ export class Store {
     }
   }
 
-  /** Borra el store del perfil activo (manual; el caso normal es automático al revocar). */
+  /**
+   * APARTA el store del perfil activo (lo que hace solo al revocar). No borra: se guarda un
+   * año en este aparato y se puede recuperar con `restoreQuarantine`.
+   */
   wipeProfile () { return this._call('wipeProfile') }
+
+  /** Lo apartado en este aparato, lo más nuevo primero: `[{ key, pid, at, threads, entries }]`. */
+  listQuarantine () { return this._call('listQuarantine') }
+
+  /** Devuelve al perfil activo lo apartado bajo `key` (mezcla; lo apartado se queda). */
+  async restoreQuarantine (key) {
+    const r = await this._call('restoreQuarantine', { key })
+    if (this._vaultSync && r?.restored?.length) { this._vaultSync.resetMarks(); this._vaultSync.run() }
+    return r
+  }
+
+  /**
+   * Adopta en el perfil los hilos de la app (por prefijo) que había en el espacio común.
+   * Lo llama `connect({ identity, adoptCommon })`; el resultado queda en `adoptedFromCommon`.
+   */
+  async _adoptFromCommon (prefixes) {
+    const r = await this._call('adoptCommon', { prefixes })
+    this.adoptedFromCommon = [...(this.adoptedFromCommon || []), ...(r?.adopted || [])]
+    return r
+  }
 
   // ----- respaldo en la bóveda (con options.identity) -----
 

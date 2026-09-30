@@ -132,3 +132,29 @@ test('una identidad sin perfil activo hace fallar la conexión en vez de caer al
   })
   expect(r).toEqual(['store-no-profile', 'store-no-profile', 'null'])
 })
+
+test('connect({ identity, adoptCommon }) trae al perfil lo que la app guardó sin identidad', async ({ page }) => {
+  await page.goto('/test/fixtures/blank.html')
+  const r = await page.evaluate(async () => {
+    const path = '/src/index.js'
+    const { Store } = await import(path)
+    const fake = (id: string) => ({ currentProfile: async () => ({ id }), onVault: () => () => {}, vaultStatus: async () => ({ paired: false }) })
+    const opts = { storeUrl: '/index.html', connectTimeoutMs: 8000, helloEveryMs: 100 }
+
+    // La versión vieja de la app: sin identidad, al espacio común. Y la moneda llega primero.
+    const vieja = await Store.connect(opts)
+    await vieja.appendMessage('wallet.cards', { id: 'c1', ts: 1 })
+    await vieja.appendMessage('otra-app.x', { id: 'x1', ts: 1 })
+
+    // La versión nueva: con identidad y diciendo cuáles son sus hilos.
+    const app = await Store.connect({ ...opts, identity: fake('perfil-a'), adoptCommon: ['wallet.'] })
+    return {
+      adopted: app.adoptedFromCommon,
+      cards: (await app.listThread('wallet.cards')).map((e: { id: string }) => e.id),
+      ajenos: (await app.listThread('otra-app.x')).length
+    }
+  })
+  expect(r.adopted).toEqual(['wallet.cards'])
+  expect(r.cards).toEqual(['c1'])
+  expect(r.ajenos).toBe(0)
+})

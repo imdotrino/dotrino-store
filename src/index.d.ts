@@ -27,7 +27,17 @@ export interface StoreOptions {
    * sincronizar con la bóveda: si se fija después, una primera sincronización podría recortar.
    */
   maxPerThread?: number
+  /**
+   * Prefijos de los hilos de la app (`['wallet.']`) que se ADOPTAN del espacio común al
+   * atarse a un perfil: lo que la app guardó cuando todavía conectaba sin identidad. Una vez
+   * por prefijo y aparato (lo adopta el primer perfil que lo pide); el original no se borra.
+   * Lo adoptado queda en `store.adoptedFromCommon`.
+   */
+  adoptCommon?: string[]
 }
+
+/** Lo apartado de un perfil expulsado: se guarda un año en el aparato. */
+export interface QuarantineEntry { key: string; pid: string | null; at: number; threads: number; entries: number }
 
 /** Estado del respaldo del almacén en la bóveda del usuario. */
 export interface VaultBackupStatus {
@@ -108,6 +118,14 @@ export class Store {
   removeThread (threadKey: string): Promise<{ removed: number }>
   removeMessage (threadKey: string, id: string): Promise<{ removed: number }>
   clearAll (): Promise<{ ok: true; keys: string[] }>
+  /** Aparta (no borra) el almacén del perfil activo; se guarda un año. */
+  wipeProfile (): Promise<{ ok: true; profileId: string | null; quarantined: boolean }>
+  /** Lo apartado en este aparato, lo más nuevo primero. */
+  listQuarantine (): Promise<QuarantineEntry[]>
+  /** Devuelve lo apartado al perfil activo (mezcla); lo apartado se queda. */
+  restoreQuarantine (key: string): Promise<{ restored: string[] }>
+  /** Hilos adoptados del espacio común al atarse al perfil (`adoptCommon`). */
+  readonly adoptedFromCommon?: string[]
   getStats (): Promise<StoreStats>
   /** Registra una apertura de `appId` (típicamente el hostname de la app). */
   recordOpen (appId: string): Promise<AppOpen>
