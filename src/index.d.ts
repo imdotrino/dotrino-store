@@ -48,8 +48,10 @@ export interface VaultBackupStatus {
    * Códigos conocidos: `no-content-key` (este aparato aún no tiene la clave de contenido del
    * perfil), `vault-no-reply` (la bóveda no contestó), `vault-outdated` (la bóveda no conoce
    * la sincronización por partes: hay que actualizarla), `not-paired`, `identity-without-vault`.
+   * `unauthorized` es que la bóveda RECHAZA a este aparato; `reason` dice por qué
+   * (`expired`: su papel caducó y hay que volver a enlazarlo; `revoked`; `acta`…).
    */
-  error: { code: string | null; message: string } | null
+  error: { code: string | null; reason?: string | null; message: string } | null
   lastSyncAt: number | null
   /** Cambios de este navegador que todavía no llegaron a la bóveda. */
   pending: number

@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/store",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "description": "Almacén compartido de hilos de mensajes para el ecosistema Dotrino (vault iframe + postMessage)",
   "type": "module",
   "main": "src/index.js",

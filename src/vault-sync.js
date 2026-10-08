@@ -182,7 +182,7 @@ export class VaultSync {
       const st = await this._identity.vaultStatus()
       if (!st?.paired) { this.stop('not-paired'); return this.status }
     } catch (e) {
-      this._set({ state: 'error', error: { code: e?.code || null, message: e?.message || String(e) } })
+      this._set({ state: 'error', error: { code: e?.code || null, reason: e?.reason || null, message: e?.message || String(e) } })
       this._scheduleRetry(() => this.start())
       return this.status
     }
@@ -290,7 +290,7 @@ export class VaultSync {
   _fail (e) {
     // El error queda en el estado, que es lo que enseña la app: no se traga, se enseña.
     console.warn('[dotrino-store] vault sync failed:', e)
-    this._set({ state: 'error', error: { code: e?.code || null, message: e?.message || String(e) } })
+    this._set({ state: 'error', error: { code: e?.code || null, reason: e?.reason || null, message: e?.message || String(e) } })
     this._scheduleRetry()
   }
 
