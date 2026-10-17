@@ -4,8 +4,8 @@
 //
 // Red primero para todo: son cuatro archivos pequeños y un arreglo del almacén tiene que
 // llegar en el acto; la copia de la caché solo se usa cuando no hay red.
-const CACHE = 'dotrino-store-v1'
-const ASSETS = ['./', './index.html', './store.js', './core.js', './sync.js']
+const CACHE = 'dotrino-store-v2'
+const ASSETS = ['./', './index.html', './store.js', './core.js', './vendor/identity/sync.js']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()))

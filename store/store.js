@@ -47,7 +47,7 @@ try {
   })
 } catch (e) { console.warn('[cc-store] context log failed', e) }
 
-import { createSync } from './sync.js'
+import { createSync } from './vendor/identity/sync.js'   // copia de @dotrino/identity (vendor.mjs)
 import * as core from './core.js'
 
 const KEY = 'cc.store.threads.v1'          // clave del localStorage VIEJO (migración)

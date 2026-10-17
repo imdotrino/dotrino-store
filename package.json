@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/store",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "description": "Almacén compartido de hilos de mensajes para el ecosistema Dotrino (vault iframe + postMessage)",
   "type": "module",
   "main": "src/index.js",
@@ -23,10 +23,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "playwright test",
-    "type-check": "tsc --noEmit"
+    "test": "node --test test/vendor-up-to-date.check.mjs && playwright test",
+    "type-check": "tsc --noEmit",
+    "vendor": "node vendor.mjs"
   },
   "devDependencies": {
+    "@dotrino/identity": "0.119.0",
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.0.0",
     "typescript": "5.9.3"

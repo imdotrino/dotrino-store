@@ -85,7 +85,7 @@ los dos: el iframe y el daemon. Es el patrón que ya funcionó con
 vendorizado.
 
 El **sync a Drive** no tiene regla propia y no hay que tocarlo: recibe la función por
-`mergeFn` (`store/sync.js:343`). Eso ya está bien.
+`mergeFn` (`store/vendor/identity/sync.js`, que es el de `@dotrino/identity`). Eso ya está bien.
 
 **Y hay un tercer sitio donde el reloj decide**, que **no es del store** pero usa la misma
 regla mala: la ficha del usuario (`me`) se resuelve con `remoteMe.updatedAt > me.updatedAt`
