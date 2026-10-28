@@ -31,6 +31,17 @@ export const TOMB_TTL_MS = 180 * 24 * 60 * 60 * 1000
  */
 export const PAGE_BYTES = 400_000
 
+/**
+ * TOPE DEL RESPALDO EN UNA BÓVEDA, por cuenta (dueño, 2026-10-28). Al pasarlo se borra lo más
+ * viejo de la app que más ocupa: los adjuntos del messenger no se llevan las facturas. Lo
+ * grande va a un content server, no aquí. Borrar por tope NO es una lápida: la entrada sale
+ * de la bóveda y nada más, el aparato la conserva y deja de subirla (el SUELO del hilo).
+ */
+export const VAULT_QUOTA_BYTES = 25 * 1024 * 1024
+
+/** La app de un hilo que nadie anotó (escrito antes de que el almacén lo anotara). */
+export const UNKNOWN_APP = '?'
+
 const encoder = new TextEncoder()
 export const byteLength = (value) => encoder.encode(typeof value === 'string' ? value : JSON.stringify(value)).length
 
@@ -62,16 +73,100 @@ export async function threadDigest (entries) {
   return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-/** Huella de cada hilo con entradas (o solo de `keys`, si se pasan). */
-export async function digestsOf (threads, keys) {
+/**
+ * Huella de cada hilo con entradas (o solo de `keys`, si se pasan). Con `floors`, solo cuenta
+ * lo que está por encima del suelo de cada hilo: así el aparato compara con la bóveda lo que
+ * ella todavía guarda, y lo que borró por el tope no se vuelve a subir.
+ */
+export async function digestsOf (threads, keys, floors = null) {
   const out = {}
   const list = Array.isArray(keys) ? keys.filter((k) => validKey(k) && has(threads, k)) : Object.keys(threads)
   for (const k of list) {
-    const arr = threads[k]
-    if (!Array.isArray(arr) || arr.length === 0) continue
+    const all = threads[k]
+    if (!Array.isArray(all)) continue
+    const arr = floors ? all.filter((e) => aboveFloor(floors, k, e)) : all
+    if (arr.length === 0) continue
     out[k] = { count: arr.length, digest: await threadDigest(arr) }
   }
   return out
+}
+
+// ----- tope del respaldo -----
+
+/** ¿Está la entrada por encima del suelo de su hilo? (`floors`: { [threadKey]: ts }) */
+export function aboveFloor (floors, k, entry) {
+  return !has(floors, k) || (Number(entry?.ts) || 0) > floors[k]
+}
+
+/** La app que escribió un hilo (`owners`: { [threadKey]: 'messenger.dotrino.com' }). */
+export function appOf (owners, k) {
+  return has(owners, k) && typeof owners[k] === 'string' && owners[k] ? owners[k] : UNKNOWN_APP
+}
+
+/** Sube los suelos de `floors` a los de `incoming` (el mayor de cada hilo). Devuelve si cambió algo. */
+export function mergeFloors (floors, incoming) {
+  let changed = false
+  for (const [k, ts] of Object.entries(incoming || {})) {
+    if (!validKey(k) || typeof ts !== 'number') continue
+    if (has(floors, k) && floors[k] >= ts) continue
+    floors[k] = ts
+    changed = true
+  }
+  return changed
+}
+
+/** Quita lo que está en o por debajo del suelo. Devuelve los hilos que cambiaron. */
+export function applyFloors (threads, floors) {
+  const changed = new Set()
+  for (const k of Object.keys(floors)) {
+    if (!has(threads, k)) continue
+    const kept = threads[k].filter((e) => aboveFloor(floors, k, e))
+    if (kept.length === threads[k].length) continue
+    if (kept.length) threads[k] = kept; else delete threads[k]
+    changed.add(k)
+  }
+  return changed
+}
+
+/**
+ * HACE CABER EL RESPALDO EN `maxBytes`: mientras se pase, sale la entrada más vieja de la app
+ * que más ocupa, y el suelo de su hilo sube a su `ts`. Es determinista: dos bóvedas con lo
+ * mismo borran lo mismo, y así la copia entre ellas no se persigue la cola.
+ *
+ * @returns {{ changed: Set<string>, evicted: number, bytes: number }}
+ */
+export function enforceQuota (threads, owners, floors, { maxBytes = VAULT_QUOTA_BYTES } = {}) {
+  const apps = new Map()
+  let total = 0
+  for (const [k, arr] of Object.entries(threads)) {
+    const app = appOf(owners, k)
+    let a = apps.get(app)
+    if (!a) apps.set(app, (a = { bytes: 0, list: [], i: 0 }))
+    for (const e of arr) {
+      const size = byteLength(e)
+      a.bytes += size
+      a.list.push({ k, ts: Number(e?.ts) || 0, size })
+      total += size
+    }
+  }
+  if (total <= maxBytes) return { changed: new Set(), evicted: 0, bytes: total }
+  for (const a of apps.values()) a.list.sort((x, y) => x.ts - y.ts || (x.k < y.k ? -1 : x.k > y.k ? 1 : 0))
+  let evicted = 0
+  while (total > maxBytes) {
+    let big = null
+    for (const a of apps.values()) if (a.i < a.list.length && (!big || a.bytes > big.bytes)) big = a
+    if (!big) break
+    const { k, ts, size } = big.list[big.i++]
+    big.bytes -= size
+    total -= size
+    evicted++
+    if (!has(floors, k) || floors[k] < ts) floors[k] = ts
+  }
+  const changed = applyFloors(threads, floors)
+  // Lo que salió de más por empatar en `ts` con lo último que salió.
+  total = 0
+  for (const arr of Object.values(threads)) for (const e of arr) total += byteLength(e)
+  return { changed, evicted, bytes: total }
 }
 
 // ----- lápidas -----
@@ -149,7 +244,7 @@ export function applyTombs (threads, tombs, incoming, now) {
  * gana la que llega (es una escritura de su dueño, no una copia vieja). Lo enterrado no
  * entra. Devuelve los hilos que cambiaron.
  */
-export function mergeEntries (threads, tombs, incoming, { mode = 'merge', max = MAX_PER_THREAD_LIMIT } = {}) {
+export function mergeEntries (threads, tombs, incoming, { mode = 'merge', max = MAX_PER_THREAD_LIMIT, floors = null } = {}) {
   const changed = new Set()
   for (const [k, arr] of Object.entries(incoming || {})) {
     if (!validKey(k) || !Array.isArray(arr) || arr.length === 0) continue
@@ -160,6 +255,7 @@ export function mergeEntries (threads, tombs, incoming, { mode = 'merge', max = 
     for (const e of arr) {
       if (!e || typeof e !== 'object' || e.id == null) continue
       if (isBuried(tombs, k, e)) continue
+      if (floors && !aboveFloor(floors, k, e)) continue
       const prev = byId.get(idOf(e))
       const ts = Number(e.ts) || 0
       const prevTs = Number(prev?.ts) || 0

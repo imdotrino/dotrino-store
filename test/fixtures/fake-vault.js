@@ -14,7 +14,7 @@ function codeError (code, message) {
 }
 
 export function createFakeVault ({ paired = true } = {}) {
-  const data = { threads: {}, tombs: {}, opens: {} }
+  const data = { threads: {}, tombs: {}, opens: {}, owners: {}, floors: {} }
   const vault = {
     data,
     calls: [],
@@ -23,16 +23,23 @@ export function createFakeVault ({ paired = true } = {}) {
     outdated: false,
     noKey: false,
     delayMs: 0,
+    quotaBytes: core.VAULT_QUOTA_BYTES,
   }
   const clamp = (n) => Math.min(Math.max(Number(n) || core.PAGE_BYTES, 1024), core.PAGE_BYTES)
   const methods = {
     getThreadDigests: ({ keys } = {}) => core.digestsOf(data.threads, keys),
+    getBackupState: async () => ({ digests: await core.digestsOf(data.threads), floors: { ...data.floors }, quota: vault.quotaBytes }),
     getThreadIndexes: ({ keys, cursor, maxBytes }) => core.indexPage(data.threads, data.tombs, keys, cursor, clamp(maxBytes)),
-    getEntries: ({ refs, maxBytes }) => core.entriesPage(data.threads, refs, clamp(maxBytes)),
-    importThreads: ({ threads = {}, tombs, mode = 'merge' }) => {
+    getEntries: ({ refs, maxBytes }) => {
+      const page = core.entriesPage(data.threads, refs, clamp(maxBytes))
+      return { ...page, owners: Object.fromEntries(Object.keys(page.threads).filter((k) => data.owners[k]).map((k) => [k, data.owners[k]])) }
+    },
+    importThreads: ({ threads = {}, tombs, owners = {}, mode = 'merge' }) => {
+      Object.assign(data.owners, owners)
       const buried = core.applyTombs(data.threads, data.tombs, tombs, Date.now())
-      const merged = core.mergeEntries(data.threads, data.tombs, threads, { mode, max: core.MAX_PER_THREAD_LIMIT })
-      return { mode, count: Object.keys(data.threads).length, changed: [...new Set([...buried.changed, ...merged])] }
+      const merged = core.mergeEntries(data.threads, data.tombs, threads, { mode, max: core.MAX_PER_THREAD_LIMIT, floors: data.floors })
+      const fitted = core.enforceQuota(data.threads, data.owners, data.floors, { maxBytes: vault.quotaBytes })
+      return { mode, count: Object.keys(data.threads).length, changed: [...new Set([...buried.changed, ...merged, ...fitted.changed])] }
     },
     mergeOpens: ({ opens }) => { core.mergeOpens(data.opens, opens); return { ...data.opens } },
     clearOpens: () => { data.opens = {}; return { ok: true } },
@@ -44,9 +51,9 @@ export function createFakeVault ({ paired = true } = {}) {
     currentProfile: async () => ({ id: vault.profileId }),
     onVault: (fn) => { vault.emitVault = fn; return () => {} },
     vaultStatus: async () => ({ paired: vault.paired }),
-    vaultStore: async (method, args) => {
+    vaultStore: async (method, args, { wake = true } = {}) => {
       const request = frameOf(args)
-      vault.calls.push({ method, request })
+      vault.calls.push({ method, request, wake })
       if (vault.delayMs) await new Promise((r) => setTimeout(r, vault.delayMs))
       if (vault.noKey) throw codeError('no-content-key', 'this device does not hold the profile content key yet')
       if (vault.offline) throw codeError('vault-no-reply', 'the vault did not reply (is it running?)')

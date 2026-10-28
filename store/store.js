@@ -79,6 +79,10 @@ let _pid = null
 const threadsKey = () => _pid ? `threads.${_pid}.v1` : IDB_KEY
 const opensKey = () => _pid ? `opens.${_pid}.v1` : OPENS_IDB_KEY
 const tombsKey = () => _pid ? `tombs.${_pid}.v1` : TOMBS_IDB_KEY
+// De qué app es cada hilo: la bóveda lo necesita para su tope (cede primero la app que más
+// ocupa). Lo anota este iframe al escribir, con el origen que da el navegador: la app no puede
+// decir que es otra.
+const ownersKey = () => _pid ? `owners.${_pid}.v1` : 'owners.common.v1'
 
 // ----- persistencia en IndexedDB -------------------------------------------
 //
@@ -95,6 +99,7 @@ let idb = null
 let state = {}            // copia de trabajo en memoria
 let opens = {}            // { [appId]: { count, ts } } — contador de aperturas
 let tombs = {}            // { [threadKey]: { [id]: [ts, at] } } — lo borrado
+let owners = {}           // { [threadKey]: 'messenger.dotrino.com' } — quién lo escribió
 let usingFallback = false // true si IndexedDB no está disponible (→ localStorage)
 let initPromise = null
 
@@ -188,6 +193,7 @@ async function init () {
   } catch (_) { opens = {} }
   if (opensKey() !== OPENS_LS_KEY) opens = await adoptarLegado(OPENS_LS_KEY, opens)
   await loadTombs()
+  await loadOwners()
   try { await pruneQuarantine() } catch (e) { console.warn('[cc-store] could not prune quarantine:', e) }
 }
 
@@ -203,6 +209,24 @@ async function writeTombs () {
   if (!usingFallback && idb) { await idbSet(idb, tombsKey(), tombs); return }
   localStorage.setItem(tombsKey(), JSON.stringify(tombs))
 }
+async function loadOwners () {
+  const stored = idb ? await idbGet(idb, ownersKey()) : JSON.parse(localStorage.getItem(ownersKey()) || 'null')
+  owners = (stored && typeof stored === 'object') ? stored : {}
+}
+async function writeOwners () {
+  if (!usingFallback && idb) { await idbSet(idb, ownersKey(), owners); return }
+  localStorage.setItem(ownersKey(), JSON.stringify(owners))
+}
+/** Anota la app de `keys`. Solo cambia lo que no estaba o era de otra. */
+async function stampOwners (keys, app) {
+  let changed = false
+  for (const k of keys) if (core.validKey(k) && app && owners[k] !== app) { owners[k] = app; changed = true }
+  if (changed) await writeOwners()
+}
+const hostOf = (origin) => { try { return new URL(origin).host } catch { return null } }
+/** Los dueños de `keys` que se conocen, para que viajen con lo que se sube. */
+const ownersOf = (keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(owners, k)).map((k) => [k, owners[k]]))
+
 initPromise = init()
 
 // Sin conexión el iframe tiene que cargar igual: lo sirve su service worker (sw.js).
@@ -355,8 +379,14 @@ const handlers = {
    * ({ [threadKey]: [[id, ts, at]] }) entierra antes de mezclar. `changed`: los hilos que
    * cambiaron, para que quien sincroniza sepa qué avisar.
    */
-  async importThreads ({ threads = {}, tombs: incomingTombs, mode = 'merge' }) {
+  async importThreads ({ threads = {}, tombs: incomingTombs, owners: incomingOwners, mode = 'merge' }) {
     if (!threads || typeof threads !== 'object') throw new Error('threads required')
+    // Lo que baja de la bóveda trae de qué app es; se anota si aquí no se sabía.
+    if (incomingOwners && typeof incomingOwners === 'object') {
+      let n = false
+      for (const [k, app] of Object.entries(incomingOwners)) if (core.validKey(k) && typeof app === 'string' && !Object.hasOwn(owners, k)) { owners[k] = app; n = true }
+      if (n) await writeOwners()
+    }
     if (mode === 'replace') { await persist(threads); return { mode, count: Object.keys(threads).length, changed: Object.keys(threads) } }
     if (mode !== 'merge' && mode !== 'upsert') throw new Error(`unknown import mode: ${mode}`)
     const data = loadAll()
@@ -370,7 +400,7 @@ const handlers = {
 
   // ----- sincronizar con la bóveda por partes (lo usa el cliente, ver src/vault-sync.js) -----
 
-  async getThreadDigests ({ keys } = {}) { return core.digestsOf(loadAll(), keys) },
+  async getThreadDigests ({ keys, floors } = {}) { return core.digestsOf(loadAll(), keys, floors || null) },
 
   /** Índice completo (ids, ts y lápidas) de los hilos pedidos, y el tope por hilo vigente. */
   async getThreadIndexes ({ keys }) {
@@ -380,7 +410,8 @@ const handlers = {
 
   /** Las entradas pedidas por id y las lápidas de `tombRefs` / de los hilos `tombKeys`. */
   async getEntries ({ refs, tombRefs, tombKeys }) {
-    return { threads: core.entriesPage(loadAll(), refs, Infinity).threads, tombs: core.pickTombs(tombs, tombRefs, tombKeys) }
+    const out = core.entriesPage(loadAll(), refs, Infinity).threads
+    return { threads: out, tombs: core.pickTombs(tombs, tombRefs, tombKeys), owners: ownersOf(Object.keys(out)) }
   },
 
   async mergeOpens ({ opens: incoming }) {
@@ -412,8 +443,9 @@ const handlers = {
     return { maxPerThread }
   },
 
-  async appendMessage ({ threadKey, entry }) {
+  async appendMessage ({ threadKey, entry }, ctx) {
     const data = loadAll()
+    await stampOwners([threadKey], hostOf(ctx?.origin))
     const { tombCleared } = core.writeEntry(data, tombs, threadKey, entry, { max: maxPerThread, now: Date.now(), newId: () => crypto.randomUUID() })
     if (tombCleared) await writeTombs()
     await persist(data)
@@ -490,6 +522,7 @@ const handlers = {
       try { opens = JSON.parse(localStorage.getItem(opensKey()) || '{}') || {} } catch { opens = {} }
     }
     await loadTombs()
+    await loadOwners()
     return { ok: true, profileId: _pid }
   },
 
@@ -515,7 +548,8 @@ const handlers = {
       index.push({ key, pid: _pid, at, threads: Object.keys(state).length, entries: Object.values(state).reduce((n, a) => n + a.length, 0) })
       await rawSet(QUARANTINE_INDEX, index)
     }
-    state = {}; opens = {}; tombs = {}
+    state = {}; opens = {}; tombs = {}; owners = {}
+    await writeOwners()
     if (!usingFallback && idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}); await idbSet(idb, tombsKey(), {}) }
     else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()); localStorage.removeItem(tombsKey()) }
     return { ok: true, profileId: _pid, quarantined: !!hay }
@@ -634,7 +668,7 @@ window.addEventListener('message', async (event) => {
   if (!handler) return reply({ error: `Unknown method: ${method}` })
   try {
     await initPromise            // backend (IndexedDB) listo antes de servir
-    reply({ result: await handler(params || {}) })
+    reply({ result: await handler(params || {}, { origin: event.origin }) })
   }
   catch (e) { reply({ error: e?.message || String(e), code: e?.code || null }) }
 })

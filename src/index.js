@@ -302,7 +302,8 @@ export class Store {
    */
   async vaultSync () {
     if (!this._vaultSync) throw codeError('vault-off', 'the store was opened without an identity')
-    const status = await this._vaultSync.run()
+    // Sincronizar a mano DESPIERTA a la bóveda si duerme (la Nube): lo pidió el usuario.
+    const status = await this._vaultSync.run({ wake: true })
     if (status.state === 'off') throw codeError('vault-off', `the vault backup is off (${status.reason})`)
     if (status.state === 'error') throw codeError(status.error.code || 'vault-sync-failed', status.error.message)
     return status

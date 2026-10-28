@@ -41,9 +41,9 @@ export interface QuarantineEntry { key: string; pid: string | null; at: number; 
 
 /** Estado del respaldo del almacén en la bóveda del usuario. */
 export interface VaultBackupStatus {
-  state: 'off' | 'syncing' | 'synced' | 'error'
+  state: 'off' | 'syncing' | 'synced' | 'waiting' | 'error'
   /** Por qué está apagado: sin identidad, sin bóveda emparejada, o te echaron de la cuenta. */
-  reason: 'no-identity' | 'not-paired' | 'revoked' | 'destroyed' | 'starting' | null
+  reason: 'no-identity' | 'not-paired' | 'revoked' | 'destroyed' | 'starting' | 'vault-asleep' | null
   /**
    * Códigos conocidos: `no-content-key` (este aparato aún no tiene la clave de contenido del
    * perfil), `vault-no-reply` (la bóveda no contestó), `vault-outdated` (la bóveda no conoce

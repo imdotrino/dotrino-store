@@ -212,3 +212,49 @@ test('un hilo recortado en el navegador no se vuelve a bajar en cada sincronizac
   expect(r.second).not.toContain('getThreadIndexes')
   expect(r.second).not.toContain('getEntries')
 })
+
+test('lo que la bóveda borra por su tope se queda en el aparato y no se vuelve a subir', async ({ page }) => {
+  await open(page)
+  const r = await page.evaluate(async () => {
+    const { store, vault } = (window as any).__t
+    vault.quotaBytes = 60_000
+    for (let i = 0; i < 8; i++) await store.appendMessage('chat', { id: `m${i}`, ts: i + 1, text: 'x'.repeat(10_000) })
+    await store.vaultSync()
+    const inVault = vault.data.threads.chat.map((e: any) => e.id)
+    const local = (await store.listThread('chat')).map((e: any) => e.id)
+    const before = vault.calls.length
+    await store.vaultSync()
+    const second = vault.calls.slice(before).map((c: any) => c.method)
+    return { inVault, local, second, floor: vault.data.floors.chat, owner: vault.data.owners.chat }
+  })
+  expect(r.local).toHaveLength(8)
+  expect(r.inVault.length).toBeLessThan(8)
+  expect(r.inVault).toContain('m7')
+  expect(r.floor).toBeGreaterThan(0)
+  expect(r.owner).toBeTruthy()
+  expect(r.second).not.toContain('importThreads')
+  expect(r.second).not.toContain('getThreadIndexes')
+})
+
+test('la bóveda dormida no se despierta por cada cambio: queda pendiente, y el botón la despierta', async ({ page }) => {
+  await open(page)
+  const r = await page.evaluate(async () => {
+    const { store, vault } = (window as any).__t
+    await store.vaultSync()                       // primera copia: despierta (nunca respaldó)
+    vault.offline = true                          // ahora duerme
+    const before = vault.calls.length
+    await store.appendMessage('chat', { id: 'm1', text: 'hola' })
+    await new Promise((res) => setTimeout(res, 2500))
+    const quiet = vault.calls.slice(before).map((c: any) => c.wake)
+    const asleep = store.vault
+    let manual: any = null
+    try { await store.vaultSync() } catch (e: any) { manual = e.code }
+    const woke = vault.calls.slice(-1)[0].wake
+    return { quiet, asleep, manual, woke }
+  })
+  expect(r.quiet.length).toBeGreaterThan(0)
+  expect(r.quiet.every((w: boolean) => w === false)).toBe(true)
+  expect(r.asleep).toMatchObject({ state: 'waiting', reason: 'vault-asleep', pending: 1 })
+  expect(r.woke).toBe(true)
+  expect(r.manual).toBe('vault-no-reply')
+})

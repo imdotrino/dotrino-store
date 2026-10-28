@@ -12,13 +12,24 @@ export const PAGE_BYTES: number
 export function byteLength (value: unknown): number
 export function validKey (key: unknown): boolean
 export function threadDigest (entries: Entry[]): Promise<string>
-export function digestsOf (threads: Threads, keys?: string[]): Promise<Record<string, { count: number; digest: string }>>
+export const VAULT_QUOTA_BYTES: number
+export const UNKNOWN_APP: string
+/** { [threadKey]: ts } — lo que la bóveda ya no guarda por el tope */
+export type Floors = Record<string, number>
+/** { [threadKey]: 'messenger.dotrino.com' } */
+export type Owners = Record<string, string>
+export function digestsOf (threads: Threads, keys?: string[], floors?: Floors | null): Promise<Record<string, { count: number; digest: string }>>
+export function aboveFloor (floors: Floors, k: string, entry: Entry): boolean
+export function appOf (owners: Owners, k: string): string
+export function mergeFloors (floors: Floors, incoming: Floors | undefined): boolean
+export function applyFloors (threads: Threads, floors: Floors): Set<string>
+export function enforceQuota (threads: Threads, owners: Owners, floors: Floors, opts?: { maxBytes?: number }): { changed: Set<string>; evicted: number; bytes: number }
 export function tombOf (tombs: Tombs, k: string, id: string | number): [number, number] | undefined
 export function isBuried (tombs: Tombs, k: string, entry: Entry): boolean
 export function bury (tombs: Tombs, k: string, id: string | number, ts: number, at: number): boolean
 export function pruneTombs (tombs: Tombs, now: number): boolean
 export function applyTombs (threads: Threads, tombs: Tombs, incoming: Record<string, [string, number, number?][]> | undefined, now: number): { changed: Set<string>; tombsChanged: boolean }
-export function mergeEntries (threads: Threads, tombs: Tombs, incoming: Threads | undefined, opts?: { mode?: 'merge' | 'upsert'; max?: number }): Set<string>
+export function mergeEntries (threads: Threads, tombs: Tombs, incoming: Threads | undefined, opts?: { mode?: 'merge' | 'upsert'; max?: number; floors?: Floors | null }): Set<string>
 export function writeEntry (threads: Threads, tombs: Tombs, k: string, entry: Entry, opts: { max: number; now: number; newId: () => string }): { entry: Entry; tombCleared: boolean }
 export function removeEntry (threads: Threads, tombs: Tombs, k: string, id: string | number, now: number): number
 export function removeWholeThread (threads: Threads, tombs: Tombs, k: string, now: number): number

@@ -31,6 +31,11 @@ const IDENTITY_PREFIX = 'identity.'
 const RESYNC_EVERY_MS = 5 * 60_000
 const VISIBLE_GAP_MS = 60_000
 const RETRY_MS = [15_000, 60_000, 5 * 60_000]
+// DESPERTAR A LA NUBE (dueño, 2026-10-28): cada despertar cuesta, y el messenger la despertaba
+// con cada mensaje. Lo normal va sin despertar: si la bóveda duerme, lo recibe al despertar. Se
+// despierta solo si este aparato lleva más de un día sin respaldar, o con el botón de sincronizar.
+const WAKE_AFTER_MS = 24 * 60 * 60_000
+const OK_KEY = 'dotrino-store.vault-ok'
 
 function codeError (code, message) {
   const e = new Error(message)
@@ -160,6 +165,18 @@ export class VaultSync {
     this._lastAttempt = 0
   }
 
+  /** Cuándo respaldó este aparato por última vez (persistente: sobrevive a recargar). */
+  _okAt () {
+    try { return Number(globalThis.localStorage?.getItem(`${OK_KEY}.${this._profileId || ''}`)) || 0 } catch (_) { return 0 }
+  }
+
+  _markOk () {
+    try { globalThis.localStorage?.setItem(`${OK_KEY}.${this._profileId || ''}`, String(Date.now())) } catch (_) {}
+  }
+
+  /** Sin respaldo desde hace más de un día (o nunca): toca despertarla. */
+  _overdue () { return Date.now() - this._okAt() > WAKE_AFTER_MS }
+
   get status () { return { ...this._status, error: this._status.error && { ...this._status.error }, tooLarge: [...this._status.tooLarge] } }
 
   _set (patch, extra) {
@@ -181,6 +198,7 @@ export class VaultSync {
       }
       const st = await this._identity.vaultStatus()
       if (!st?.paired) { this.stop('not-paired'); return this.status }
+      this._profileId = (await this._identity.currentProfile?.().catch(() => null))?.id || null
     } catch (e) {
       this._set({ state: 'error', error: { code: e?.code || null, reason: e?.reason || null, message: e?.message || String(e) } })
       this._scheduleRetry(() => this.start())
@@ -250,20 +268,27 @@ export class VaultSync {
     this._flushTimer = setTimeout(() => this._queueFlush(), FLUSH_DELAY_MS)
   }
 
-  /** Ponerse al día con la bóveda. Nunca lanza: devuelve el `status` en que quedó. */
-  run () {
+  /**
+   * Ponerse al día con la bóveda. Nunca lanza: devuelve el `status` en que quedó.
+   * `wake`: despertarla si duerme (el botón de sincronizar). Sin él, solo si toca (`_overdue`).
+   */
+  run ({ wake = false } = {}) {
     if (!this._started) return Promise.resolve(this.status)
+    if (wake) this._wakeAsked = true
     if (!this._reconcileQueued) {
       this._reconcileQueued = true
       this._queue = this._queue.then(async () => {
         this._reconcileQueued = false
         this._lastAttempt = Date.now()
         clearTimeout(this._retryTimer)
+        this._wake = this._wakeAsked || this._overdue()
+        this._wakeAsked = false
         this._set({ state: 'syncing', error: null, tooLarge: [] })
         try {
           const changed = await this._reconcile()
           this._retry = 0
-          this._set({ state: 'synced', error: null, lastSyncAt: Date.now() }, { changed })
+          this._markOk()
+          this._set({ state: 'synced', reason: null, error: null, lastSyncAt: Date.now() }, { changed })
         } catch (e) {
           this._fail(e)
         }
@@ -277,10 +302,12 @@ export class VaultSync {
     this._flushQueued = true
     this._queue = this._queue.then(async () => {
       this._flushQueued = false
+      this._wake = this._overdue()
       try {
         await this._flush()
-        if (this._status.state === 'error') this.run()   // lo que falló antes no era solo esto
-        else this._set({ state: 'synced', lastSyncAt: Date.now() })
+        this._markOk()
+        if (this._status.state === 'error' || this._status.state === 'waiting') this.run()   // lo que falló antes no era solo esto
+        else this._set({ state: 'synced', reason: null, lastSyncAt: Date.now() })
       } catch (e) {
         this._fail(e)
       }
@@ -288,6 +315,13 @@ export class VaultSync {
   }
 
   _fail (e) {
+    // DORMIDA NO ES UN ERROR: se mandó sin despertarla y no contestó. Lo recibe al despertar, y
+    // aquí queda pendiente hasta que conteste o toque despertarla.
+    if (e?.code === 'vault-no-reply' && !this._wake) {
+      this._set({ state: 'waiting', reason: 'vault-asleep', error: null })
+      this._scheduleRetry()
+      return
+    }
     // El error queda en el estado, que es lo que enseña la app: no se traga, se enseña.
     console.warn('[dotrino-store] vault sync failed:', e)
     this._set({ state: 'error', error: { code: e?.code || null, reason: e?.reason || null, message: e?.message || String(e) } })
@@ -296,16 +330,20 @@ export class VaultSync {
 
   async _vault (method, args) {
     try {
-      return await this._identity.vaultStore(method, args)
+      return await this._identity.vaultStore(method, args, { wake: !!this._wake })
     } catch (e) {
       if (e?.code === 'store-unknown-method') throw codeError('vault-outdated', `the vault does not know "${method}": it has to be updated`)
       throw e
     }
   }
 
-  async _push (threads, tombs, mode) {
+  async _push (threads, tombs, mode, owners = {}) {
     const { batches: list, tooLarge } = batches(threads, tombs, PUSH_BYTES)
-    for (const batch of list) await this._vault('importThreads', { threads: batch.threads, tombs: batch.tombs, mode })
+    for (const batch of list) {
+      // De qué app es cada hilo, para el tope de la bóveda (cede primero la que más ocupa).
+      const own = Object.fromEntries(Object.keys(batch.threads).filter((k) => Object.hasOwn(owners, k)).map((k) => [k, owners[k]]))
+      await this._vault('importThreads', { threads: batch.threads, tombs: batch.tombs, owners: own, mode })
+    }
     return tooLarge
   }
 
@@ -316,7 +354,7 @@ export class VaultSync {
     this._dirty = emptyDirty()
     try {
       const local = await this._call('getEntries', { refs: toObject(d.ids), tombRefs: toObject(d.tombIds), tombKeys: [...d.tombKeys] })
-      const tooLarge = await this._push(local.threads, local.tombs, 'upsert')
+      const tooLarge = await this._push(local.threads, local.tombs, 'upsert', local.owners || {})
       if (d.clearOpens) await this._vault('clearOpens', {})
       if (tooLarge.length) this._set({ tooLarge: [...this._status.tooLarge, ...tooLarge] })
     } catch (e) {
@@ -329,7 +367,11 @@ export class VaultSync {
 
   async _reconcile () {
     await this._flush()
-    const [remote, local] = await Promise.all([this._vault('getThreadDigests', {}), this._call('getThreadDigests', {})])
+    // EL SUELO DE LA BÓVEDA (dueño, 2026-10-28): lo que borró por su tope de 25 MB sale de ella y
+    // nada más. Aquí se queda, y la huella local se calcula sin ello para no volver a subirlo.
+    const { digests: remote, floors } = await this._vault('getBackupState', {})
+    this._floors = floors || {}
+    const local = await this._call('getThreadDigests', { floors: this._floors })
     const keys = []
     for (const k of new Set([...Object.keys(local), ...Object.keys(remote)])) {
       // Los hilos `identity.*` son de la IDENTIDAD (su libro de contactos, `identity.peers`),
@@ -348,6 +390,10 @@ export class VaultSync {
 
   async _reconcileThreads (keys) {
     const local = await this._call('getThreadIndexes', { keys })
+    const floors = this._floors || {}
+    for (const [k, idx] of Object.entries(local.indexes || {})) {
+      if (Object.hasOwn(floors, k)) idx.items = idx.items.filter(([, ts]) => ts > floors[k])
+    }
     const remote = {}
     let cursor = null
     do {
@@ -373,7 +419,7 @@ export class VaultSync {
     // Primero SUBIR: si el navegador recorta al bajar, lo que solo estaba aquí ya está a salvo.
     if (nonEmpty(push.refs) || nonEmpty(push.tombRefs)) {
       const out = await this._call('getEntries', { refs: push.refs, tombRefs: push.tombRefs })
-      const tooLarge = await this._push(out.threads, out.tombs, 'merge')
+      const tooLarge = await this._push(out.threads, out.tombs, 'merge', out.owners || {})
       if (tooLarge.length) this._set({ tooLarge: [...this._status.tooLarge, ...tooLarge] })
     }
 
@@ -386,7 +432,7 @@ export class VaultSync {
       let refs = chunk
       while (refs) {
         const page = await this._vault('getEntries', { refs })
-        const r = await this._call('importThreads', { threads: page.threads, mode: 'merge' })
+        const r = await this._call('importThreads', { threads: page.threads, owners: page.owners, mode: 'merge' })
         for (const k of r.changed) changed.add(k)
         refs = page.rest
       }
@@ -394,7 +440,7 @@ export class VaultSync {
 
     // Lo que siga distinto después de esto se explica por un recorte (un lado tiene más
     // de lo que el otro guarda): se anota para no repetir el trabajo mientras ninguno cambie.
-    const [l2, r2] = await Promise.all([this._call('getThreadDigests', { keys }), this._vault('getThreadDigests', { keys })])
+    const [l2, r2] = await Promise.all([this._call('getThreadDigests', { keys, floors }), this._vault('getThreadDigests', { keys })])
     for (const k of keys) {
       if (l2[k]?.digest === r2[k]?.digest) this._marks.delete(k)
       else this._marks.set(k, `${l2[k]?.digest || ''}|${r2[k]?.digest || ''}`)
