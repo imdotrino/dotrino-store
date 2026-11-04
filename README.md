@@ -60,6 +60,22 @@ const stats = await store.getStats()
 - **Un fallo ya no dura toda la sesión.** Hasta 0.8.0 la promesa rechazada se quedaba cacheada en el singleton, así que cualquier reintento —el botón «Reintentar» que enseñan las apps— devolvía el mismo error sin intentar nada. Ahora el fallo desmonta el iframe y el siguiente `connect()` levanta uno nuevo.
 - **El error dice qué pasó**: `Store did not respond within 20000ms (https://store.dotrino.com/ never loaded)`.
 
+## Hilos solo de este aparato: `local.*` (desde 0.14.0)
+
+Un hilo cuyo nombre empieza por **`local.`** se guarda igual que cualquier otro (IndexedDB, atado
+al perfil), pero **no va a la bóveda**: ni se sube, ni se baja, ni deja nada pendiente en el punto
+del respaldo. Es para lo que cambia mucho y no merece respaldo: dónde quedó tu personaje en un
+juego, un cursor, un borrador de segundos. Cada escritura de un hilo normal sale a la bóveda 1,5 s
+después; con la posición de un juego eso es una sincronización tras cada paso.
+
+```js
+import { Store, LOCAL_PREFIX } from '@dotrino/store'   // LOCAL_PREFIX === 'local.'
+await store.appendMessage('local.gridgame.position', { id: 'pos', ts: Date.now(), pos })
+```
+
+Lo que pierdes a cambio, y hay que saberlo al elegirlo: si se borra el navegador, ese hilo se va
+con él, y otro aparato tuyo no lo ve.
+
 ## Un almacén por perfil: `connect({ identity })` (desde 0.10.0)
 
 Con `identity` (de `@dotrino/identity`), el almacén se ata al **perfil activo**: cada perfil del aparato tiene sus propios hilos, y si el perfil está emparejado con una bóveda, el almacén se respalda en ella.

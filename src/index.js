@@ -8,6 +8,7 @@
  */
 
 import { VaultSync } from './vault-sync.js'
+export { LOCAL_PREFIX, isLocalThread } from './vault-sync.js'
 
 let singleton = null
 

@@ -28,6 +28,15 @@ const MAX_ENTRY_BYTES = 550_000
 const FLUSH_DELAY_MS = 1500
 /** Hilos de la identidad en el almacén de la bóveda: no son de ninguna app (ver `_reconcile`). */
 const IDENTITY_PREFIX = 'identity.'
+/**
+ * HILOS SOLO DE ESTE APARATO (dueño, 2026-11-04): lo que empieza por `local.` se queda en el
+ * navegador y no va a la bóveda, ni de subida ni de bajada. Es para lo que no vale un respaldo
+ * y cambia mucho: dónde quedó tu personaje en un juego, un cursor, un borrador de segundos.
+ * Cada escritura de un hilo normal sale a la bóveda; con la posición de gridgame eso era una
+ * sincronización tras cada paso.
+ */
+export const LOCAL_PREFIX = 'local.'
+export const isLocalThread = (k) => typeof k === 'string' && k.startsWith(LOCAL_PREFIX)
 const RESYNC_EVERY_MS = 5 * 60_000
 const VISIBLE_GAP_MS = 60_000
 const RETRY_MS = [15_000, 60_000, 5 * 60_000]
@@ -253,16 +262,20 @@ export class VaultSync {
   noteWrite (method, params, result) {
     if (!this._started) return
     const d = this._dirty
-    if (method === 'appendMessage') addTo(d.ids, params.threadKey, result.id)
+    const before = dirtyCount(d)
+    if (method === 'appendMessage') { if (!isLocalThread(params.threadKey)) addTo(d.ids, params.threadKey, result.id) }
     else if (method === 'importThreads') {
       for (const [k, list] of Object.entries(params.threads || {})) {
+        if (isLocalThread(k)) continue
         for (const e of list || []) if (e && e.id != null) addTo(d.ids, k, e.id)
       }
-    } else if (method === 'removeMessage') addTo(d.tombIds, params.threadKey, params.id)
-    else if (method === 'removeThread') d.tombKeys.add(params.threadKey)
-    else if (method === 'clearAll') for (const k of result.keys || []) d.tombKeys.add(k)
+    } else if (method === 'removeMessage') { if (!isLocalThread(params.threadKey)) addTo(d.tombIds, params.threadKey, params.id) }
+    else if (method === 'removeThread') { if (!isLocalThread(params.threadKey)) d.tombKeys.add(params.threadKey) }
+    else if (method === 'clearAll') { for (const k of result.keys || []) if (!isLocalThread(k)) d.tombKeys.add(k) }
     else if (method === 'clearOpens') d.clearOpens = true
     else return
+    // Solo hilos locales: no hay nada que mandar, y no se programa ninguna sincronización.
+    if (dirtyCount(d) === before) return
     this._setPending()
     clearTimeout(this._flushTimer)
     this._flushTimer = setTimeout(() => this._queueFlush(), FLUSH_DELAY_MS)
@@ -377,6 +390,8 @@ export class VaultSync {
       // Los hilos `identity.*` son de la IDENTIDAD (su libro de contactos, `identity.peers`),
       // no de las apps: los concilia ella, y aquí ni se bajan ni se suben.
       if (k.startsWith(IDENTITY_PREFIX)) continue
+      // Los `local.*` no salen del aparato (y si la bóveda tuviera uno, no se baja).
+      if (isLocalThread(k)) continue
       const pair = `${local[k]?.digest || ''}|${remote[k]?.digest || ''}`
       if (local[k]?.digest === remote[k]?.digest) { this._marks.delete(k); continue }
       if (this._marks.get(k) === pair) continue

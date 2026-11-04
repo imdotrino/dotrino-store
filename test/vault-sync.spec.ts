@@ -107,6 +107,40 @@ test('lo escrito sube solo, sin sincronizar a mano', async ({ page }) => {
   expect((await page.evaluate(() => (window as any).__t.store.vault)).pending).toBe(0)
 })
 
+test('los hilos local.* no van a la bóveda ni dejan nada pendiente', async ({ page }) => {
+  await open(page)
+  await settled(page)
+  const r = await page.evaluate(async () => {
+    const { store, vault } = (window as any).__t
+    for (let i = 0; i < 20; i++) {
+      await store.removeThread('local.gridgame.position')
+      await store.appendMessage('local.gridgame.position', { id: 'pos', ts: 100 + i, pos: { x: i, y: 0 } })
+    }
+    await store.vaultSync()
+    return {
+      pending: store.vault.pending,
+      inVault: Object.keys(vault.data.threads).filter((k: string) => k.startsWith('local.')),
+      tombs: Object.keys(vault.data.tombs).filter((k: string) => k.startsWith('local.')),
+      here: (await store.listThread('local.gridgame.position')).map((e: any) => e.pos.x)
+    }
+  })
+  expect(r).toEqual({ pending: 0, inVault: [], tombs: [], here: [19] })
+})
+
+test('un local.* que ya estuviera en la bóveda no se baja', async ({ page }) => {
+  await open(page)
+  await settled(page)
+  await page.evaluate(async () => {
+    const { vault } = (window as any).__t
+    vault.data.threads['local.x'] = [{ id: 'a', ts: 1 }]
+    vault.data.threads['app.y'] = [{ id: 'b', ts: 1 }]
+  })
+  await page.evaluate(() => (window as any).__t.store.vaultSync())
+  const keys = await page.evaluate(() => (window as any).__t.store.listThreadKeys())
+  expect(keys).toContain('app.y')
+  expect(keys).not.toContain('local.x')
+})
+
 test('un borrado sin bóveda queda pendiente, sube al volver y no resucita', async ({ page }) => {
   await open(page)
   await settled(page)
