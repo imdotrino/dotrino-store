@@ -60,7 +60,7 @@ const stats = await store.getStats()
 - **Un fallo ya no dura toda la sesión.** Hasta 0.8.0 la promesa rechazada se quedaba cacheada en el singleton, así que cualquier reintento —el botón «Reintentar» que enseñan las apps— devolvía el mismo error sin intentar nada. Ahora el fallo desmonta el iframe y el siguiente `connect()` levanta uno nuevo.
 - **El error dice qué pasó**: `Store did not respond within 20000ms (https://store.dotrino.com/ never loaded)`.
 
-## Hilos solo de este aparato: `local.*` (desde 0.14.0)
+## Hilos solo de este aparato: `local.*` (desde 0.14.1)
 
 Un hilo cuyo nombre empieza por **`local.`** se guarda igual que cualquier otro (IndexedDB, atado
 al perfil), pero **no va a la bóveda**: ni se sube, ni se baja, ni deja nada pendiente en el punto
