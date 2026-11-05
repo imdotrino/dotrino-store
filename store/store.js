@@ -158,14 +158,14 @@ function idbSet (db, key, val) {
  * varios perfiles cuando se escribió, así que esos datos son de uno solo y duplicarlos
  * en cada cuenta sería peor que perderlos.
  */
-async function adoptarLegado (lsKey, actual) {
-  if (actual && Object.keys(actual).length) return actual   // ya hay algo: no se pisa
-  let viejo = null
-  try { const raw = localStorage.getItem(lsKey); viejo = raw ? JSON.parse(raw) : null } catch (_) { return actual }
-  if (!viejo || typeof viejo !== 'object' || !Object.keys(viejo).length) return actual
+async function adoptLegacy (lsKey, current) {
+  if (current && Object.keys(current).length) return current   // ya hay algo: no se pisa
+  let legacy = null
+  try { const raw = localStorage.getItem(lsKey); legacy = raw ? JSON.parse(raw) : null } catch (_) { return current }
+  if (!legacy || typeof legacy !== 'object' || !Object.keys(legacy).length) return current
   try { localStorage.removeItem(lsKey) } catch (_) { /* se adopta igual */ }
   console.log('[cc-store] adopted what the version before IndexedDB had saved:', lsKey)
-  return viejo
+  return legacy
 }
 
 // Inicializa el backend: abre IndexedDB, carga el estado y adopta (una vez) los
@@ -177,21 +177,21 @@ async function init () {
     idb = await openIdb()
     const stored = await idbGet(idb, threadsKey())
     state = (stored && typeof stored === 'object') ? stored : {}
-    state = await adoptarLegado(KEY, state)
+    state = await adoptLegacy(KEY, state)
     if (Object.keys(state).length) await idbSet(idb, threadsKey(), state).catch(() => {})
   } catch (e) {
-    console.warn('[cc-store] IndexedDB no disponible, uso localStorage:', e)
+    console.warn('[cc-store] IndexedDB unavailable, falling back to localStorage:', e)
     usingFallback = true
     idb = null
     try { const raw = localStorage.getItem(threadsKey()); state = raw ? JSON.parse(raw) : {} } catch { state = {} }
-    state = await adoptarLegado(KEY, state)
+    state = await adoptLegacy(KEY, state)
   }
   // Carga el contador de aperturas (namespace aparte de los hilos).
   try {
     const stored = idb ? await idbGet(idb, opensKey()) : JSON.parse(localStorage.getItem(opensKey()) || 'null')
     opens = (stored && typeof stored === 'object') ? stored : {}
   } catch (_) { opens = {} }
-  if (opensKey() !== OPENS_LS_KEY) opens = await adoptarLegado(OPENS_LS_KEY, opens)
+  if (opensKey() !== OPENS_LS_KEY) opens = await adoptLegacy(OPENS_LS_KEY, opens)
   await loadTombs()
   await loadOwners()
   try { await pruneQuarantine() } catch (e) { console.warn('[cc-store] could not prune quarantine:', e) }
@@ -294,7 +294,7 @@ async function writeState () {
       try { localStorage.setItem(threadsKey(), JSON.stringify(state)); return true }
       catch (e) {
         if (!isQuotaError(e)) { console.warn('[store] persist (ls) failed:', e); return false }
-        if (!dropOldest(state, 0.2)) { console.warn('[store] quota — nada que evictar'); return false }
+        if (!dropOldest(state, 0.2)) { console.warn('[store] quota — nothing left to evict'); return false }
       }
     }
     return false
@@ -303,7 +303,7 @@ async function writeState () {
     try { await idbSet(idb, threadsKey(), state); return true }
     catch (e) {
       if (!isQuotaError(e)) { console.warn('[store] persist (idb) failed:', e); return false }
-      if (!dropOldest(state, 0.2)) { console.warn('[store] quota — nada que evictar'); return false }
+      if (!dropOldest(state, 0.2)) { console.warn('[store] quota — nothing left to evict'); return false }
     }
   }
   return false
@@ -540,8 +540,8 @@ const handlers = {
    */
   async wipeProfile () {
     const at = Date.now()
-    const hay = Object.keys(state).length || Object.keys(tombs).length
-    if (hay) {
+    const hasData = Object.keys(state).length || Object.keys(tombs).length
+    if (hasData) {
       const key = `quarantine.${_pid || 'common'}.${at}`
       await rawSet(key, { pid: _pid, at, threads: state, opens, tombs })
       const index = (await rawGet(QUARANTINE_INDEX)) || []
@@ -552,7 +552,7 @@ const handlers = {
     await writeOwners()
     if (!usingFallback && idb) { await idbSet(idb, threadsKey(), {}); await idbSet(idb, opensKey(), {}); await idbSet(idb, tombsKey(), {}) }
     else { localStorage.removeItem(threadsKey()); localStorage.removeItem(opensKey()); localStorage.removeItem(tombsKey()) }
-    return { ok: true, profileId: _pid, quarantined: !!hay }
+    return { ok: true, profileId: _pid, quarantined: !!hasData }
   },
 
   /** Lo apartado en este aparato (de todos los perfiles), lo más nuevo primero. */
