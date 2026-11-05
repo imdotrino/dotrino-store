@@ -165,3 +165,8 @@ export interface SyncEvent {
   error?: string
   ts: number
 }
+
+/** Prefijo de los hilos que se quedan en este navegador y no se respaldan en la bóveda. */
+export declare const LOCAL_PREFIX: 'local.'
+/** `true` si el hilo `k` es local (empieza por `LOCAL_PREFIX`). */
+export declare function isLocalThread (k: unknown): boolean

@@ -38,6 +38,8 @@ jobs:
 
       - run: npm i -g npm@latest
       - run: npm ci
+      # Tipos estrictos (checkJs + strict) antes de nada.
+      - run: npm run type-check
 
       # La suite es de navegador (Playwright), y el navegador hay que bajarlo aparte:
       # el `.npmrc` del ecosistema lleva `ignore-scripts=true` (CONVENCIONES §1.1), así

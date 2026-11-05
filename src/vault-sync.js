@@ -47,9 +47,7 @@ const WAKE_AFTER_MS = 24 * 60 * 60_000
 const OK_KEY = 'dotrino-store.vault-ok'
 
 function codeError (code, message) {
-  const e = new Error(message)
-  e.code = code
-  return e
+  return Object.assign(new Error(message), { code })
 }
 
 const emptyDirty = () => ({ ids: new Map(), tombIds: new Map(), tombKeys: new Set(), clearOpens: false })
@@ -138,14 +136,16 @@ export function batches (threads = {}, tombs = {}, maxBytes = PUSH_BYTES) {
 /** Parte `{ threadKey: ids }` en pedidos de `maxBytes` de ids como mucho. */
 function chunkRefs (refs, maxBytes) {
   const out = []
+  /** @type {Record<string, string[]> | null} */
   let cur = null
   let bytes = 0
   for (const [k, ids] of Object.entries(refs)) {
     for (const id of ids) {
       const size = byteLength(id) + 4
       if (!cur || bytes + size > maxBytes) { cur = {}; out.push(cur); bytes = 0 }
-      if (!cur[k]) { cur[k] = []; bytes += byteLength(k) }
-      cur[k].push(id)
+      let list = cur[k]
+      if (!list) { list = cur[k] = []; bytes += byteLength(k) }
+      list.push(id)
       bytes += size
     }
   }
@@ -154,10 +154,11 @@ function chunkRefs (refs, maxBytes) {
 
 export class VaultSync {
   /**
-   * @param {object} o
-   * @param {(method: string, params?: object) => Promise<any>} o.call  pedir a la página del almacén
-   * @param {object} o.identity  @dotrino/identity (vaultStatus, vaultStore)
-   * @param {(status: object, extra?: object) => void} o.emit
+   * @param {{
+   *   call: (method: string, params?: object) => Promise<any>,
+   *   identity: any,
+   *   emit: (status: object, extra?: object) => void
+   * }} o  `call` pide a la página del almacén; `identity` es @dotrino/identity (vaultStatus, vaultStore)
    */
   constructor ({ call, identity, emit }) {
     this._call = call
